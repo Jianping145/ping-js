@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Supjav
 // @namespace    gmspider
-// @version      2025.08.24
-// @description  Supjav GMSpider (重构版: 通用选择器 + cf_clearance 兼容)
-// @author       Luomo (refactored by Minis)
+// @version      2026.09.17
+// @description  Supjav GMSpider (修复版: 增强 Cloudflare 检测 + 空结果处理)
+// @author       Luomo (refactored by Minis, fixed by Kimi)
 // @match        https://supjav.com/*
 // @require      https://cdn.jsdelivr.net/npm/jquery@3.7.1/dist/jquery.slim.min.js
 // @grant        GM_cookie
@@ -51,6 +51,42 @@ console.log(JSON.stringify(GM_info));
                 "@Cookie=cf_clearance=" + encodeURIComponent(cf_clearance);
         }
         return url;
+    }
+
+    // ---------------- Cloudflare 检测 ----------------
+    function detectCloudflare() {
+        // 检测多种 Cloudflare 验证页面特征
+        const cfSelectors = [
+            ".loading-verifying",
+            "#challenge-form",
+            ".cf-browser-verification",
+            "#cf-please-wait",
+            ".cf-challenge-running",
+            "[data-translate='checking_browser']",
+            ".cf-wrapper",
+            "#challenge-error-title",
+            ".cf-challenge-body",
+            "#cf-challenge-running"
+        ];
+        const hasCF = cfSelectors.some(s => $(s).length > 0);
+
+        // 检测页面标题是否包含 Cloudflare 特征
+        const title = document.title.toLowerCase();
+        const isCFTitle = title.includes("cloudflare") || 
+                          title.includes("checking") || 
+                          title.includes("verify") ||
+                          title.includes("attention required") ||
+                          title.includes("please wait") ||
+                          title.includes("just a moment");
+
+        // 检测 body 内容是否很少（验证页面通常内容很少）
+        const bodyText = document.body?.innerText?.trim() || "";
+        const isEmptyBody = bodyText.length < 200;
+
+        // 检测是否有实际内容
+        const hasContent = $(".post, .video-item, .card-video, .thumbnail").length > 0;
+
+        return (hasCF || isCFTitle || (isEmptyBody && !hasContent)) && !hasContent;
     }
 
     // ---------------- 通用列表解析 ----------------
@@ -227,17 +263,104 @@ console.log(JSON.stringify(GM_info));
         }
     };
 
-    $(document).ready(function () {
-        if ($(".loading-verifying").length > 0) {
-            if (typeof GmSpiderInject !== 'undefined') GmSpiderInject.ShowWebview();
+    // ---------------- 启动逻辑 ----------------
+    let spiderExecuted = false;
+    let checkInterval = null;
+
+    function executeSpider() {
+        if (spiderExecuted) return;
+        spiderExecuted = true;
+
+        if (checkInterval) {
+            clearInterval(checkInterval);
+            checkInterval = null;
         }
-    });
-    $(unsafeWindow).on("load", function () {
+
+        console.log("执行 Spider:", GMSpiderArgs.fName);
         const result = GmSpider[GMSpiderArgs.fName](...GMSpiderArgs.fArgs);
-        console.log(result);
+        console.log("Spider 结果:", result);
+
+        // 如果结果为空，输出警告
+        if (!result.list || result.list.length === 0) {
+            console.warn("解析结果为空！可能原因：");
+            console.warn("1. Cloudflare 验证未通过");
+            console.warn("2. 网站结构改版，选择器失效");
+            console.warn("3. 页面未完全加载");
+            console.warn("当前页面标题:", document.title);
+            console.warn("当前页面 URL:", location.href);
+            console.warn("页面 body 长度:", document.body?.innerHTML?.length);
+        }
+
         if (typeof GmSpiderInject !== 'undefined') {
             if (typeof GmSpiderInject.HideWebview === 'function') GmSpiderInject.HideWebview();
             GmSpiderInject.SetSpiderResult(JSON.stringify(result));
         }
+    }
+
+    function startCloudflareWatch() {
+        console.log("检测到 Cloudflare 验证页面，启动监控...");
+
+        // 显示 WebView 让用户可以看到验证过程
+        if (typeof GmSpiderInject !== 'undefined') {
+            GmSpiderInject.ShowWebview();
+        }
+
+        // 轮询检查验证是否完成
+        checkInterval = setInterval(function() {
+            const hasContent = $(".post, .video-item, .card-video, .thumbnail").length > 0;
+            const isCF = detectCloudflare();
+
+            if (hasContent && !isCF) {
+                console.log("Cloudflare 验证完成，内容已加载");
+                executeSpider();
+            }
+        }, 1000);
+
+        // 45 秒后超时
+        setTimeout(function() {
+            if (checkInterval) {
+                clearInterval(checkInterval);
+                checkInterval = null;
+                console.warn("Cloudflare 验证超时");
+                // 超时后也尝试执行一次
+                executeSpider();
+            }
+        }, 45000);
+    }
+
+    $(document).ready(function () {
+        console.log("Document ready, 检测 Cloudflare...");
+
+        // 延迟检测，确保 DOM 稳定
+        setTimeout(function() {
+            if (detectCloudflare()) {
+                startCloudflareWatch();
+            }
+        }, 500);
     });
+
+    $(unsafeWindow).on("load", function () {
+        console.log("Window load 事件触发");
+
+        // 延迟执行，确保动态内容加载
+        setTimeout(function() {
+            if (detectCloudflare()) {
+                startCloudflareWatch();
+            } else {
+                executeSpider();
+            }
+        }, 1500);
+    });
+
+    // 备用：如果 8 秒后还没有执行，强制检查一次
+    setTimeout(function() {
+        if (!spiderExecuted) {
+            console.warn("8 秒超时，强制检查...");
+            if (detectCloudflare()) {
+                startCloudflareWatch();
+            } else {
+                executeSpider();
+            }
+        }
+    }, 8000);
 })();
