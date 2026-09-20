@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         MissAV
 // @namespace    gmspider
-// @version      2025.08.24
-// @description  MissAV GMSpider (重构版: 选择器通用化, 直接解析当前页)
-// @author       Luomo (refactored by Minis)
+// @version      2025.09.20
+// @description  MissAV GMSpider (修复版: 更新选择器, 增强兼容性)
+// @author       Luomo (refactored by Minis, fixed by AI)
 // @match        https://missav.*/*
+// @match        https://*.missav.*/*
 // @require      https://cdn.jsdelivr.net/npm/jquery@3.7.1/dist/jquery.slim.min.js
 // @grant        unsafeWindow
 // ==/UserScript==
@@ -23,7 +24,15 @@ console.log(JSON.stringify(GM_info));
 
     // ---------------- 工具 ----------------
     function getCategoryFromUrl(url) {
-        return url.split('/cn/').at(1) || url.split('/').filter(Boolean).pop();
+        if (!url) return '';
+        // 处理相对路径
+        if (url.startsWith('/')) {
+            return url.split('/').filter(Boolean).pop() || '';
+        }
+        // 处理绝对路径
+        const match = url.match(/\/cn\/(.+)/);
+        if (match) return match[1];
+        return url.split('/').filter(Boolean).pop() || '';
     }
 
     function parseItems($boxes) {
@@ -34,22 +43,59 @@ console.log(JSON.stringify(GM_info));
             const href = $a.attr("href");
             if (!href) return;
             const slug = getCategoryFromUrl(href);
-            const title = $box.find(".text-secondary, .title, h3, h4").first().text().trim() ||
+
+            // 尝试多种标题选择器
+            const title = $box.find(".text-secondary, .title, h3, h4, .video-title, .card-title, [class*='title']").first().text().trim() ||
                 $box.find("img").attr("alt") || "";
-            const pic = $box.find("img").data("src") || $box.find("img").attr("src") || "";
-            const year = $box.find(".absolute, .duration, .year, .right-1, .left-1").first().text().trim();
-            const remarks = $box.find(".left-1, .badge, .tag").first().text().trim();
-            if (title) {
-                list.push({vod_id: slug, vod_name: title, vod_pic: pic, vod_year: year, vod_remarks: remarks});
+
+            // 尝试多种图片选择器
+            const $img = $box.find("img").first();
+            const pic = $img.data("src") || $img.data("original") || $img.attr("src") || 
+                       $img.attr("data-lazy-src") || "";
+
+            // 尝试多种时长/日期选择器
+            const year = $box.find(".absolute, .duration, .year, .right-1, .left-1, .badge, [class*='duration'], [class*='time']").first().text().trim();
+
+            // 尝试多种标签选择器
+            const remarks = $box.find(".left-1, .badge, .tag, .label, [class*='tag'], [class*='label']").first().text().trim();
+
+            if (title && slug) {
+                list.push({
+                    vod_id: slug, 
+                    vod_name: title, 
+                    vod_pic: pic, 
+                    vod_year: year, 
+                    vod_remarks: remarks
+                });
             }
         });
         return list;
     }
 
     function getPageCount() {
-        const txt = $("#price-currency, .pagination .page-item:last, .pagination li:last").text().trim();
-        const n = parseInt(txt.replace(/[^0-9]/g, ''));
-        return isNaN(n) ? 1 : n;
+        // 尝试多种分页选择器
+        const selectors = [
+            ".pagination .page-item:last a",
+            ".pagination li:last a", 
+            ".pagination .active + li a",
+            "[class*='pagination'] li:last a",
+            ".page-item:last a"
+        ];
+
+        for (let sel of selectors) {
+            const txt = $(sel).text().trim();
+            const n = parseInt(txt.replace(/[^0-9]/g, ''));
+            if (!isNaN(n) && n > 0) return n;
+        }
+
+        // 尝试从页面文本中提取页码
+        const pageText = $("body").text().match(/(\d+)\s*页/g);
+        if (pageText) {
+            const n = parseInt(pageText[0]);
+            if (!isNaN(n)) return n;
+        }
+
+        return 1;
     }
 
     // ---------------- Spider ----------------
@@ -97,9 +143,33 @@ console.log(JSON.stringify(GM_info));
                 },
                 list: []
             };
-            // 首页推荐区
-            const $boxes = $(".gap-5 .thumbnail, .video-item, .card-video, .thumbnail-item");
+
+            // 首页推荐区 - 更新选择器
+            const selectors = [
+                ".gap-5 .thumbnail",
+                ".video-item", 
+                ".card-video",
+                ".thumbnail-item",
+                "[class*='thumbnail']",
+                "[class*='video-item']",
+                "[class*='card']",
+                ".grid > div",
+                ".container .grid > div"
+            ];
+
+            let $boxes = $();
+            for (let sel of selectors) {
+                $boxes = $(sel);
+                if ($boxes.length > 0) break;
+            }
+
+            // 如果还是没找到，尝试更通用的选择器
+            if ($boxes.length === 0) {
+                $boxes = $("a[href*='/cn/']").parent();
+            }
+
             result.list = parseItems($boxes);
+            console.log("HomeContent found items:", result.list.length);
             return result;
         },
 
@@ -107,14 +177,28 @@ console.log(JSON.stringify(GM_info));
             const result = {list: [], pagecount: 1};
 
             if (tid === "actresses/ranking") {
-                // 女优排行榜
-                $(".gap-4 .space-y-4, .actress-item, .actress-card").each(function () {
+                // 女优排行榜 - 更新选择器
+                const selectors = [
+                    ".gap-4 .space-y-4",
+                    ".actress-item", 
+                    ".actress-card",
+                    "[class*='actress']",
+                    "[class*='performer']"
+                ];
+
+                let $items = $();
+                for (let sel of selectors) {
+                    $items = $(sel);
+                    if ($items.length > 0) break;
+                }
+
+                $items.each(function () {
                     const $a = $(this).find("a").first();
                     const href = $a.attr("href");
                     if (!href) return;
                     result.list.push({
                         vod_id: getCategoryFromUrl(href),
-                        vod_name: $(this).find(".truncate, .name, .title").first().text().trim(),
+                        vod_name: $(this).find(".truncate, .name, .title, [class*='name']").first().text().trim(),
                         vod_pic: $(this).find("img").attr("src") || $(this).find("img").data("src") || "",
                         vod_remarks: $(this).find(".text-sm, .count, .badge").first().text().trim(),
                         vod_tag: "folder",
@@ -144,13 +228,27 @@ console.log(JSON.stringify(GM_info));
                 }
                 // 兜底：页面上的分类卡片
                 if (result.list.length === 0) {
-                    $(".gap-4 div, .genre-item, .category-item").each(function () {
+                    const selectors = [
+                        ".gap-4 div",
+                        ".genre-item",
+                        ".category-item",
+                        "[class*='genre']",
+                        "[class*='category']"
+                    ];
+
+                    let $items = $();
+                    for (let sel of selectors) {
+                        $items = $(sel);
+                        if ($items.length > 0) break;
+                    }
+
+                    $items.each(function () {
                         const $a = $(this).find("a").first();
                         const href = $a.attr("href");
                         if (!href) return;
                         result.list.push({
                             vod_id: getCategoryFromUrl(href),
-                            vod_name: $(this).find(".text-nord13, .title, .name").first().text().trim(),
+                            vod_name: $(this).find(".text-nord13, .title, .name, [class*='title']").first().text().trim(),
                             vod_remarks: $(this).find(".text-nord10 a, .count").first().text().trim(),
                             vod_tag: "folder",
                             style: {type: "rect", ratio: 2}
@@ -159,69 +257,164 @@ console.log(JSON.stringify(GM_info));
                 }
                 result.pagecount = 1;
             } else {
-                // 普通视频列表
-                const $boxes = $(".gap-5 .thumbnail, .video-item, .card-video, .thumbnail-item, .box-item");
+                // 普通视频列表 - 更新选择器
+                const selectors = [
+                    ".gap-5 .thumbnail",
+                    ".video-item",
+                    ".card-video", 
+                    ".thumbnail-item",
+                    ".box-item",
+                    "[class*='thumbnail']",
+                    "[class*='video']"
+                ];
+
+                let $boxes = $();
+                for (let sel of selectors) {
+                    $boxes = $(sel);
+                    if ($boxes.length > 0) break;
+                }
+
+                // 兜底
+                if ($boxes.length === 0) {
+                    $boxes = $("a[href*='/cn/']").parent();
+                }
+
                 result.list = parseItems($boxes);
                 result.pagecount = getPageCount();
             }
+            console.log("CategoryContent found items:", result.list.length);
             return result;
         },
 
         detailContent: function (ids) {
             const slug = ids[0];
             const detail = {};
-            // 解析详情信息
-            $(".space-y-2:not(.list-disc) .text-secondary, .detail-item, .meta-item").each(function () {
+
+            // 解析详情信息 - 更新选择器
+            const detailSelectors = [
+                ".space-y-2:not(.list-disc) .text-secondary",
+                ".detail-item",
+                ".meta-item",
+                "[class*='detail']",
+                "[class*='meta']",
+                ".info-item"
+            ];
+
+            let $details = $();
+            for (let sel of detailSelectors) {
+                $details = $(sel);
+                if ($details.length > 0) break;
+            }
+
+            $details.each(function () {
                 const $item = $(this);
-                const key = $item.find("span:first, .key, dt").first().text().replace(":", "").trim();
+                const key = $item.find("span:first, .key, dt, [class*='label']").first().text().replace(":", "").trim();
+                if (!key) return;
+
                 const $links = $item.find("a");
                 if ($links.length === 0) {
-                    detail[key] = $item.find("span:first, .key, dt").first().remove().end().text().trim();
+                    const $clone = $item.clone();
+                    $clone.find("span:first, .key, dt, [class*='label']").first().remove();
+                    detail[key] = $clone.text().trim();
                 } else {
                     detail[key] = [];
                     $links.each(function () {
                         const id = getCategoryFromUrl($(this).attr("href"));
                         const name = $(this).text().trim();
-                        detail[key].push(`[a=cr:{"id":"${id}","name":"${name}"}/]${name}[/a]`);
+                        if (id && name) {
+                            detail[key].push(`[a=cr:{"id":"${id}","name":"${name}"}/]${name}[/a]`);
+                        }
                     });
                 }
             });
 
             const format = (keys) => keys.map(k => detail[k]).filter(Boolean).join(" ");
+
+            // 获取图片 - 更新选择器
+            const pic = $("meta[property='og:image']").attr("content") || 
+                       $("head link[as=image]").attr("href") ||
+                       $(".video-cover img").attr("src") ||
+                       $("img[alt*='cover']").attr("src") || "";
+
+            // 获取年份/日期
+            const year = $("#space-y-2 time, .release-date, .date, [class*='date'], [class*='time']").first().text().trim();
+
+            // 获取播放地址 - 增强检测
+            let playUrl = "";
+            if (typeof hls !== "undefined" && hls.url) {
+                playUrl = "多视轨$" + hls.url;
+            } else {
+                // 尝试从页面中提取 m3u8 地址
+                const html = document.documentElement.innerHTML;
+                const m3u8Match = html.match(/https?:\/\/[^"\s]+\.m3u8[^"\s]*/);
+                if (m3u8Match) {
+                    playUrl = "多视轨$" + m3u8Match[0];
+                }
+            }
+
             const vod = {
                 vod_id: slug,
                 vod_name: slug.toUpperCase(),
-                vod_pic: $("head link[as=image], meta[property='og:image']").attr("href") || $("meta[property='og:image']").attr("content") || "",
-                vod_year: $("#space-y-2 time, .release-date, .date").text().trim(),
-                vod_remarks: format(["类型", "标签", "genre"]),
-                vod_actor: format(["女优", "演员", "actress", "actor"]),
-                vod_content: $('a.items-center:contains("显示更多"), .description, .content').length > 0
-                    ? $('meta[name=description]').attr('content') || $('meta[property="og:title"]').attr('content') || ''
-                    : '',
+                vod_pic: pic,
+                vod_year: year,
+                vod_remarks: format(["类型", "标签", "genre", "Genre"]),
+                vod_actor: format(["女优", "演员", "actress", "actor", "Actress", "Actor"]),
+                vod_content: $('meta[name=description]').attr('content') || 
+                            $('meta[property="og:title"]').attr('content') || 
+                            $('.description').text().trim() || '',
                 vod_play_from: "MissAV",
-                vod_play_url: (typeof hls !== "undefined" && hls.url) ? "多视轨$" + hls.url : ""
+                vod_play_url: playUrl
             };
+            console.log("DetailContent:", vod);
             return {list: [vod]};
         },
 
         searchContent: function (key, quick, pg) {
-            // 真正去搜索页
             const result = {list: [], pagecount: 1};
-            const $boxes = $(".gap-5 .thumbnail, .video-item, .card-video, .thumbnail-item");
+
+            // 更新选择器
+            const selectors = [
+                ".gap-5 .thumbnail",
+                ".video-item",
+                ".card-video",
+                ".thumbnail-item",
+                "[class*='thumbnail']",
+                "[class*='video']"
+            ];
+
+            let $boxes = $();
+            for (let sel of selectors) {
+                $boxes = $(sel);
+                if ($boxes.length > 0) break;
+            }
+
+            // 兜底
+            if ($boxes.length === 0) {
+                $boxes = $("a[href*='/cn/']").parent();
+            }
+
             result.list = parseItems($boxes);
             result.pagecount = getPageCount();
+            console.log("SearchContent found items:", result.list.length);
             return result;
         }
     };
 
     $(document).ready(function () {
-        if ($("#cf-wrapper").length > 0) {
+        // 检测 Cloudflare 拦截
+        if ($("#cf-wrapper").length > 0 || $("title").text().includes("Just a moment")) {
             console.log("源站不可用:" + $('title').text());
             if (typeof GM_toastLong === "function") GM_toastLong("源站不可用:" + $('title').text());
         } else {
-            const result = GmSpider[GMSpiderArgs.fName](...GMSpiderArgs.fArgs);
-            if (typeof GmSpiderInject !== 'undefined') {
-                GmSpiderInject.SetSpiderResult(JSON.stringify(result));
+            try {
+                const result = GmSpider[GMSpiderArgs.fName](...GMSpiderArgs.fArgs);
+                if (typeof GmSpiderInject !== 'undefined') {
+                    GmSpiderInject.SetSpiderResult(JSON.stringify(result));
+                }
+                console.log("Spider result:", result);
+            } catch (e) {
+                console.error("Spider error:", e);
+                if (typeof GM_toastLong === "function") GM_toastLong("解析错误: " + e.message);
             }
         }
     });
