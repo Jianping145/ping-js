@@ -1,4 +1,4 @@
-// beeg.js - FongMi（蜂蜜影视）T4 格式
+// beeg.js - T4 格式（修复播放问题）
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
@@ -456,7 +456,7 @@ async function category(tid, pg, filter, extend) {
 
 }
 
-// T4: detail - 返回多清晰度播放列表
+// T4: detail - 详情（修复：优先使用 fl_cdn_multi，包含 1080p）
 
 async function detail(ids) {
 
@@ -488,21 +488,23 @@ async function detail(ids) {
 
         let qualities = []
 
-        // 优先使用 fl_cdn_multi（主播放列表，包含所有清晰度）
+        // 1. 优先加入 fl_cdn_multi（主播放列表，包含 1080p 在内所有清晰度）
 
         if (hls.fl_cdn_multi) {
 
-            let multiUrl = buildHlsUrl(hls.fl_cdn_multi)
+            let multiUrl = hls.fl_cdn_multi
 
-            if (multiUrl) {
+            if (!multiUrl.startsWith('http')) {
 
-                qualities.push({ name: '自动', url: multiUrl, height: 99999 })
+                multiUrl = `https://video.beeg.com/${multiUrl}`
 
             }
 
+            qualities.push({ name: '自动(含1080p)', url: multiUrl, height: 99999 })
+
         }
 
-        // 其他清晰度作为备选
+        // 2. 其他单独清晰度作为备选
 
         for (let [key, value] of Object.entries(hls)) {
 
@@ -512,19 +514,19 @@ async function detail(ids) {
 
                 let height = match ? parseInt(match[1]) : 0
 
-                let u = buildHlsUrl(value)
+                let u = value
 
-                if (u) {
+                if (!u.startsWith('http')) {
 
-                    qualities.push({ name: `${height}p`, url: u, height: height })
+                    u = `https://video.beeg.com/${u}`
 
                 }
+
+                qualities.push({ name: `${height}p`, url: u, height: height })
 
             }
 
         }
-
-        // 按高度降序
 
         qualities.sort((a, b) => b.height - a.height)
 
@@ -536,7 +538,7 @@ async function detail(ids) {
 
         }
 
-        let vod_play_url = playUrls.length > 0 ? playUrls.join('#') : '默认$'
+        let vod_play_url = playUrls.length > 0 ? playUrls.join('#') : '默认$' + id
 
         let vod = {
 
@@ -548,11 +550,23 @@ async function detail(ids) {
 
             vod_remarks: '',
 
+            vod_year: '',
+
+            vod_area: '',
+
+            vod_actor: '',
+
+            vod_director: '',
+
+            vod_content: '',
+
             vod_play_from: 'Beeg',
 
             vod_play_url: vod_play_url
 
         }
+
+        console.log('detail vod_play_url: ' + vod_play_url)
 
         return JSON.stringify({ list: [vod] })
 
@@ -566,21 +580,7 @@ async function detail(ids) {
 
 }
 
-// 辅助：构建 HLS 完整地址
-
-function buildHlsUrl(v) {
-
-    if (!v) return ''
-
-    if (typeof v !== 'string') return ''
-
-    if (v.startsWith('http://') || v.startsWith('https://')) return v
-
-    return `https://video.beeg.com/${v}`
-
-}
-
-// T4: play - 直接返回完整地址（FongMi 不截断）
+// T4: play - 播放
 
 async function play(flag, id, vipFlags) {
 
