@@ -1,4 +1,4 @@
-// beeg.js - T4 格式（修复播放问题）
+// beeg.js - T4 格式（修复播放问题 + 支持 1080p）
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
@@ -342,7 +342,7 @@ async function init(cfg) {
 
 }
 
-// T4: home - 返回分类
+// T4: home
 
 async function home(filter) {
 
@@ -366,7 +366,7 @@ async function home(filter) {
 
 }
 
-// T4: homeVod - 首页推荐
+// T4: homeVod
 
 async function homeVod() {
 
@@ -404,7 +404,7 @@ async function homeVod() {
 
 }
 
-// T4: category - 分类列表
+// T4: category
 
 async function category(tid, pg, filter, extend) {
 
@@ -456,7 +456,7 @@ async function category(tid, pg, filter, extend) {
 
 }
 
-// T4: detail - 详情（修复：优先使用 fl_cdn_multi，包含 1080p）
+// T4: detail - 详情（列出所有清晰度）
 
 async function detail(ids) {
 
@@ -486,6 +486,8 @@ async function detail(ids) {
 
         let hls = file.hls_resources || {}
 
+        console.log('ALL hls keys: ' + Object.keys(hls).join(','))
+
         let qualities = []
 
         // 1. 优先加入 fl_cdn_multi（主播放列表，包含 1080p 在内所有清晰度）
@@ -500,11 +502,11 @@ async function detail(ids) {
 
             }
 
-            qualities.push({ name: '自动(含1080p)', url: multiUrl, height: 99999 })
+            qualities.push({ name: '自动(1080p优先)', url: multiUrl, height: 99999 })
 
         }
 
-        // 2. 其他单独清晰度作为备选
+        // 2. 其他单独清晰度
 
         for (let [key, value] of Object.entries(hls)) {
 
@@ -580,7 +582,7 @@ async function detail(ids) {
 
 }
 
-// T4: play - 播放
+// T4: play
 
 async function play(flag, id, vipFlags) {
 
@@ -614,7 +616,7 @@ async function play(flag, id, vipFlags) {
 
 }
 
-// T4: search - 搜索
+// T4: search
 
 async function search(wd, quick) {
 
@@ -680,7 +682,7 @@ async function search(wd, quick) {
 
 }
 
-// 辅助函数：解析 req 返回
+// 辅助
 
 function parseRes(res) {
 
@@ -693,8 +695,6 @@ function parseRes(res) {
     return res
 
 }
-
-// 辅助函数：构建视频卡片
 
 function buildVod(video) {
 
