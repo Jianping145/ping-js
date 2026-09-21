@@ -1,4 +1,4 @@
-// beeg.js - T4 格式（修复播放问题）
+// beeg.js - FongMi（蜂蜜影视）T4 格式
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
@@ -348,11 +348,7 @@ async function home(filter) {
 
     let classes = []
 
-    
-
     classes.push({ type_id: 'home', type_name: '首页' })
-
-    
 
     for (let ch of CHANNELS) {
 
@@ -360,15 +356,11 @@ async function home(filter) {
 
     }
 
-    
-
     for (let m of MODELS) {
 
         classes.push({ type_id: m.slug, type_name: m.name })
 
     }
-
-    
 
     return JSON.stringify({ class: classes })
 
@@ -384,13 +376,9 @@ async function homeVod() {
 
         let res = await req(url, { headers: { 'User-Agent': UA } })
 
-        
-
         let data = parseRes(res)
 
         let list = []
-
-        
 
         if (Array.isArray(data)) {
 
@@ -403,8 +391,6 @@ async function homeVod() {
             }
 
         }
-
-        
 
         return JSON.stringify({ list: list })
 
@@ -430,15 +416,11 @@ async function category(tid, pg, filter, extend) {
 
         let url = `${API_BASE}/tag/videos/${tid}?limit=48&offset=${offset}`
 
-        
-
         let res = await req(url, { headers: { 'User-Agent': UA } })
 
         let data = parseRes(res)
 
         let list = []
-
-        
 
         if (Array.isArray(data)) {
 
@@ -452,13 +434,11 @@ async function category(tid, pg, filter, extend) {
 
         }
 
-        
+        return JSON.stringify({
 
-        return JSON.stringify({ 
+            list: list,
 
-            list: list, 
-
-            page: page, 
+            page: page,
 
             pagecount: page + 1,
 
@@ -476,7 +456,7 @@ async function category(tid, pg, filter, extend) {
 
 }
 
-// T4: detail - 详情（修复：优先 fl_cdn_multi 主播放列表）
+// T4: detail - 返回多清晰度播放列表
 
 async function detail(ids) {
 
@@ -484,13 +464,11 @@ async function detail(ids) {
 
         let id = Array.isArray(ids) ? ids[0] : ids
 
-        
-
         let url = `${API_BASE}/facts/file/${id}`
 
         let res = await req(url, {
 
-            headers: { 
+            headers: {
 
                 'User-Agent': UA,
 
@@ -502,29 +480,15 @@ async function detail(ids) {
 
         })
 
-        
-
         let data = parseRes(res)
 
         let file = data?.file || {}
 
         let hls = file.hls_resources || {}
 
-        
-
-        // 调试日志：查看 HLS 资源结构
-
-        console.log('hls keys: ' + Object.keys(hls).join(','))
-
-        console.log('fl_cdn_multi: ' + hls.fl_cdn_multi)
-
-        
-
         let qualities = []
 
-        
-
-        // 1. 优先使用 fl_cdn_multi（主播放列表，包含所有清晰度）
+        // 优先使用 fl_cdn_multi（主播放列表，包含所有清晰度）
 
         if (hls.fl_cdn_multi) {
 
@@ -538,9 +502,7 @@ async function detail(ids) {
 
         }
 
-        
-
-        // 2. 其他清晰度作为备选
+        // 其他清晰度作为备选
 
         for (let [key, value] of Object.entries(hls)) {
 
@@ -562,15 +524,9 @@ async function detail(ids) {
 
         }
 
-        
-
-        // 排序：高度降序（自动在最高前）
+        // 按高度降序
 
         qualities.sort((a, b) => b.height - a.height)
-
-        
-
-        // 构建 vod_play_url：名称$地址#名称$地址
 
         let playUrls = []
 
@@ -580,11 +536,7 @@ async function detail(ids) {
 
         }
 
-        
-
         let vod_play_url = playUrls.length > 0 ? playUrls.join('#') : '默认$'
-
-        
 
         let vod = {
 
@@ -596,27 +548,11 @@ async function detail(ids) {
 
             vod_remarks: '',
 
-            vod_year: '',
-
-            vod_area: '',
-
-            vod_actor: '',
-
-            vod_director: '',
-
-            vod_content: '',
-
             vod_play_from: 'Beeg',
 
             vod_play_url: vod_play_url
 
         }
-
-        
-
-        console.log('detail vod_play_url: ' + vod_play_url)
-
-        
 
         return JSON.stringify({ list: [vod] })
 
@@ -644,7 +580,7 @@ function buildHlsUrl(v) {
 
 }
 
-// T4: play - 播放
+// T4: play - 直接返回完整地址（FongMi 不截断）
 
 async function play(flag, id, vipFlags) {
 
@@ -652,9 +588,7 @@ async function play(flag, id, vipFlags) {
 
         console.log('play url: ' + id)
 
-        
-
-        return JSON.stringify({ 
+        return JSON.stringify({
 
             url: id,
 
@@ -688,15 +622,11 @@ async function search(wd, quick) {
 
         if (!wd) return JSON.stringify({ list: [] })
 
-        
-
         let queryWords = wd.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length >= 2)
 
         let cards = []
 
         let seen = {}
-
-        
 
         for (let page = 1; page <= 5; page++) {
 
@@ -704,19 +634,13 @@ async function search(wd, quick) {
 
             let url = `${API_BASE}/tag/videos/index?limit=48&offset=${offset}`
 
-            
-
             try {
 
                 let res = await req(url, { headers: { 'User-Agent': UA } })
 
                 let data = parseRes(res)
 
-                
-
                 if (!Array.isArray(data)) continue
-
-                
 
                 for (let video of data) {
 
@@ -740,13 +664,9 @@ async function search(wd, quick) {
 
             }
 
-            
-
             if (cards.length >= 48) break
 
         }
-
-        
 
         return JSON.stringify({ list: cards })
 
@@ -790,8 +710,6 @@ function buildVod(video) {
 
         if (!fileId) return null
 
-        
-
         let duration = video.file?.fl_duration || 0
 
         let durationStr = formatDuration(duration)
@@ -799,8 +717,6 @@ function buildVod(video) {
         let height = video.file?.fl_height || 0
 
         let fcThumbs = fcFacts?.fc_thumbs || []
-
-        
 
         let title = 'Untitled'
 
@@ -816,8 +732,6 @@ function buildVod(video) {
 
         }
 
-        
-
         let cover = ''
 
         if (fcThumbs.length > 0) {
@@ -829,8 +743,6 @@ function buildVod(video) {
             cover = `https://img.externulls.com/${fileData[0].cd_file}/preview_01.jpg`
 
         }
-
-        
 
         return {
 
