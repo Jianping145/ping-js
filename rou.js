@@ -42,6 +42,10 @@ function getBuf(res) {
     if (typeof Uint8Array !== 'undefined' && res.content instanceof Uint8Array) return res.content
     if (Array.isArray(res.content)) return Uint8Array.from(res.content)
     if (res.buffer instanceof ArrayBuffer) return new Uint8Array(res.buffer)
+    // axios / fetch 风格：res.data
+    if (res.data instanceof ArrayBuffer) return new Uint8Array(res.data)
+    if (typeof Uint8Array !== 'undefined' && res.data instanceof Uint8Array) return res.data
+    if (Array.isArray(res.data)) return Uint8Array.from(res.data)
     if (typeof res.buffer === 'string' && res.buffer.length > 16) {
         try { return b64ToBytes(res.buffer) } catch (e) {}
     }
@@ -87,7 +91,7 @@ async function fetchBin(url) {
                 return hexToBytes(res.content)
             }
             const buf = getBuf(res)
-            if (buf && buf.length > 8) return buf
+            if (buf && buf.length > 0) return buf
         } catch (e) {
             console.log('fetchBin: ' + e)
         }
@@ -133,23 +137,31 @@ function parseList(html) {
 
 function extractEvPlayUrl(html) {
     if (!html) return ''
-    let m = html.match(/ev(?::\$R\[\d+\])?=\{d:"([^"]+)",k:(\d+)\}/)
+    // 兼容：ev={d:"..",k:1} / ev = { d: "..", k: 1 } / window.ev=... / JSON 风格
+    let m = html.match(/ev(?:\s*:\s*\$R\[\d+\])?\s*=\s*\{\s*d\s*:\s*"([^"]+)"\s*,\s*k\s*:\s*(\d+)\s*\}/) ||
+            html.match(/["']ev["']\s*:\s*\{\s*["']d["']\s*:\s*"([^"]+)"\s*,\s*["']k["']\s*:\s*(\d+)/)
     let d, k
     if (m) { d = m[1]; k = parseInt(m[2], 10) }
     else {
-        m = html.match(/ev(?::\$R\[\d+\])?=\{k:(\d+),d:"([^"]+)"\}/)
-        if (m) { k = parseInt(m[1], 10); d = m[2] }
-        else {
-            m = html.match(/"ev"\s*:\s*\{\s*"d"\s*:\s*"([^"]+)"\s*,\s*"k"\s*:\s*(\d+)/)
-            if (!m) return ''
-            d = m[1]; k = parseInt(m[2], 10)
-        }
+        m = html.match(/ev(?:\s*:\s*\$R\[\d+\])?\s*=\s*\{\s*k\s*:\s*(\d+)\s*,\s*d\s*:\s*"([^"]+)"\s*\}/) ||
+            html.match(/["']ev["']\s*:\s*\{\s*["']k["']\s*:\s*(\d+)\s*,\s*["']d["']\s*:\s*"([^"]+)"/)
+        if (!m) return ''
+        // 本分支正则捕获顺序为 (k, d)
+        k = parseInt(m[1], 10); d = m[2]
     }
     try {
         const raw = b64ToBytes(d)
-        let decoded = ''
-        for (let i = 0; i < raw.length; i++) decoded += String.fromCharCode((raw[i] - k) & 0xffff)
-        const obj = JSON.parse(decoded)
+        // 兼容两种加密语义：(byte+k)%256 或 (byte+k)&0xffff（latin1 截断）
+        let obj = null
+        for (const mask of [0xff, 0xffff]) {
+            try {
+                let decoded = ''
+                for (let i = 0; i < raw.length; i++) decoded += String.fromCharCode((raw[i] - k) & mask)
+                obj = JSON.parse(decoded)
+                if (obj) break
+            } catch (e) {}
+        }
+        if (!obj) return ''
         let u = obj.videoUrl || obj.url || obj.m3u8 || ''
         if (!u) return ''
         u = String(u).replace(/\\\//g, '/')
@@ -258,6 +270,29 @@ function joinUrl(base, u) {
         return (m ? m[1] : HOST) + u
     }
     return base.replace(/\/?$/, '/') + u.replace(/^\.\//, '')
+}
+
+/** 解包后的 m3u8 临时缓存：play 解包 → 缓存 → proxy 输出，避免 data URI 兼容性差 */
+const __m3u8Cache = new Map()
+function cachePut(content) {
+    try { if (__m3u8Cache.size > 60) __m3u8Cache.clear() } catch (e) {}
+    const k = 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
+    __m3u8Cache.set(k, content)
+    return 'roucache://' + k
+}
+function cacheGet(key) { return __m3u8Cache.get(key) }
+
+/** 从 Next.js __NEXT_DATA__ 里兜底提取播放地址 */
+function extractNextData(html) {
+    const m = html.match(/<script[^>]*id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/)
+    if (!m) return ''
+    try {
+        const json = JSON.parse(m[1])
+        const str = JSON.stringify(json)
+        const u = str.match(/"(?:videoUrl|playUrl|m3u8|video_url|play_url)"\s*:\s*"(https?:[^"]+)"/)
+        if (u) return u[1].replace(/\\\//g, '/')
+    } catch (e) {}
+    return ''
 }
 
 function proxyPrefix() {
@@ -369,6 +404,7 @@ async function detail(ids) {
         const og = html.match(/property=["']og:image["'][^>]*content=["']([^"']+)/i)
         if (og) pic = og[1]
         let playUrl = extractEvPlayUrl(html)
+        if (!playUrl) playUrl = extractNextData(html)
         if (!playUrl) playUrl = HOST + '/api/hls/' + id
         return JSON.stringify({
             list: [{
@@ -387,34 +423,26 @@ async function play(flag, id, vipFlags) {
     const url = String(id || '')
     console.log('play in: ' + url)
     try {
-        // 在 play 阶段直接解包 m3u8，减少一次代理跳转失败
-        if (/\/api\/hls\//i.test(url)) {
+        // 需要解包的地址（PNG 伪装 或 api/hls）：在 play 阶段解包，m3u8 存缓存，通过 proxy 输出
+        if (/\/api\/hls\//i.test(url) || /\.png(\?|$)/i.test(url)) {
             const body = await resolvePayload(url)
             const head = utf8(body.subarray(0, Math.min(8, body.length)))
             if (head.indexOf('#EXT') === 0) {
                 const text = utf8(body)
                 const base = url.replace(/[^/]*$/, '')
                 const m3u8 = rewriteM3u8(text, base)
-                // 方案 A：data URI（播放列表不经过 proxy，分片仍走 proxy）
-                const dataUri = 'data:application/vnd.apple.mpegurl;base64,' + bytesToB64(
-                    (function () {
-                        // utf8 encode m3u8
-                        const s = m3u8
-                        const a = new Uint8Array(s.length)
-                        for (let i = 0; i < s.length; i++) a[i] = s.charCodeAt(i) & 0xff
-                        return a
-                    })()
-                )
-                console.log('play dataUri m3u8 len=' + m3u8.length)
+                const cacheUrl = cachePut(m3u8)
+                console.log('play cached m3u8 len=' + m3u8.length + ' -> ' + cacheUrl)
                 return JSON.stringify({
                     parse: 0,
-                    url: dataUri,
+                    url: toProxy(cacheUrl),
                     header: JSON.stringify(hdr()),
                 })
             }
+            console.log('play: payload not m3u8, fallback proxy')
         }
-        // 其它：走 proxy
-        if (/\.png(\?|$)/i.test(url) || /\/api\/hls\//i.test(url)) {
+        // 其余（直链 m3u8 / ts）：走 proxy 或直连
+        if (/\.(png|m3u8|ts)(\?|$)/i.test(url) || /\/api\/hls\//i.test(url)) {
             return JSON.stringify({
                 parse: 0,
                 url: toProxy(url),
@@ -424,7 +452,6 @@ async function play(flag, id, vipFlags) {
         return JSON.stringify({ parse: 0, url: url, header: JSON.stringify(hdr()) })
     } catch (e) {
         console.log('play err: ' + e)
-        // 回退 proxy
         return JSON.stringify({
             parse: 0,
             url: toProxy(url),
@@ -437,41 +464,38 @@ async function search(wd, quick, pg) {
     try {
         if (!wd) return JSON.stringify({ list: [] })
         const page = parseInt(pg) || 1
-        const q = encodeURIComponent(String(wd).trim())
-        const urls = [
-            HOST + '/search?keyword=' + q + '&page=' + page,
-            HOST + '/search?q=' + q + '&page=' + page,
-            HOST + '/t/' + q + '?order=createdAt&page=' + page,
-        ]
-        let list = []
-        for (const url of urls) {
-            try {
-                console.log('search: ' + url)
-                const html = await fetchHtml(url)
-                if (!html || html.indexOf('Just a moment') >= 0) {
-                    console.log('search blocked or empty')
-                    continue
-                }
-                list = parseList(html)
-                console.log('search hits: ' + list.length)
-                if (list.length > 0) break
-            } catch (e) {
-                console.log('search try err: ' + e)
-            }
-        }
-        return JSON.stringify({ list: list, page: page, pagecount: list.length > 0 ? page + 1 : 1 })
+        const html = await fetchHtml(HOST + '/search?keyword=' + encodeURIComponent(wd) + '&page=' + page)
+        const list = parseList(html)
+        return JSON.stringify({ list, page, pagecount: list.length > 0 ? page + 1 : 1 })
     } catch (e) {
-        console.log('search err: ' + e)
         return JSON.stringify({ list: [] })
     }
 }
 
 async function proxy(params) {
     try {
+        // 有的壳直接传 query 字符串
+        if (typeof params === 'string') {
+            try {
+                const q = new URLSearchParams(params)
+                params = { url: q.get('url'), target: q.get('target'), u: q.get('u'), path: q.get('path') }
+            } catch (e) {}
+        }
         let raw = (params && (params.url || params.target || params.u || params.path)) || ''
         if (Array.isArray(raw)) raw = raw[0] || ''
         if (!raw) return [400, 'text/plain', 'missing url']
         try { raw = decodeURIComponent(String(raw)) } catch (e) {}
+
+        // play 阶段解包并缓存的 m3u8
+        if (raw.indexOf('roucache://') === 0) {
+            const content = cacheGet(raw.slice('roucache://'.length))
+            if (content) {
+                console.log('proxy cache hit len=' + content.length)
+                return [200, 'application/vnd.apple.mpegurl', content]
+            }
+            return [404, 'text/plain', 'cache miss: ' + raw]
+        }
+
         // base64url token
         if (raw.indexOf('http') !== 0 && raw.indexOf('/') !== 0) {
             try {
@@ -490,9 +514,13 @@ async function proxy(params) {
             const m3u8 = rewriteM3u8(text, raw.replace(/[^/]*$/, ''))
             return [200, 'application/vnd.apple.mpegurl', m3u8]
         }
-        // TS
-        console.log('proxy ts ' + body.length)
-        return [200, 'video/MP2T', body]
+        // TS 分片魔数 0x47('G')；不是则多半是错误页，直接返回 404 便于排查
+        if (body.length > 1 && body[0] === 0x47) {
+            console.log('proxy ts ' + body.length)
+            return [200, 'video/mp2t', body]
+        }
+        console.log('proxy unknown content, head=' + head + ' len=' + body.length)
+        return [404, 'text/plain', 'not a media payload, head=' + head]
     } catch (e) {
         console.log('proxy err: ' + e)
         return [500, 'text/plain', String(e)]
