@@ -38,32 +38,33 @@ function parseRes(res) {
 
 function getBuf(res) {
     if (!res) return null
+    // 二进制直出
     if (res.content instanceof ArrayBuffer) return new Uint8Array(res.content)
     if (typeof Uint8Array !== 'undefined' && res.content instanceof Uint8Array) return res.content
     if (Array.isArray(res.content)) return Uint8Array.from(res.content)
     if (res.buffer instanceof ArrayBuffer) return new Uint8Array(res.buffer)
-    // axios / fetch 风格：res.data
     if (res.data instanceof ArrayBuffer) return new Uint8Array(res.data)
     if (typeof Uint8Array !== 'undefined' && res.data instanceof Uint8Array) return res.data
     if (Array.isArray(res.data)) return Uint8Array.from(res.data)
-    if (typeof res.buffer === 'string' && res.buffer.length > 16) {
-        try { return b64ToBytes(res.buffer) } catch (e) {}
-    }
-    // 有的壳 content 是 base64
-    if (typeof res.content === 'string' && res.content.length > 16) {
-        const s = res.content
-        // 先当 latin1 二进制
-        const a = new Uint8Array(s.length)
-        for (let i = 0; i < s.length; i++) a[i] = s.charCodeAt(i) & 0xff
-        if (a[0] === 0x89 || a[0] === 0x47 || a[0] === 0x23) return a
-        // 再试 base64
-        try {
-            if (/^[A-Za-z0-9+/=\r\n]+$/.test(s.slice(0, 100))) {
-                const b = b64ToBytes(s.replace(/\s/g, ''))
-                if (b && b.length > 8) return b
-            }
-        } catch (e) {}
-        return a
+    if (res.body instanceof ArrayBuffer) return new Uint8Array(res.body)
+    // base64 字符串（content / data / buffer）
+    for (const key of ['content', 'data', 'buffer', 'body']) {
+        const s = res[key]
+        if (typeof s === 'string' && s.length > 16) {
+            // 先当 latin1 二进制
+            const a = new Uint8Array(s.length)
+            for (let i = 0; i < s.length; i++) a[i] = s.charCodeAt(i) & 0xff
+            if (a[0] === 0x89 || a[0] === 0x47 || a[0] === 0x23 || a[0] === 0x3c) return a
+            // 再试 base64 / base64url
+            try {
+                const clean = s.replace(/\s/g, '').replace(/-/g, '+').replace(/_/g, '/')
+                if (/^[A-Za-z0-9+/=]+$/.test(clean.slice(0, 100))) {
+                    const b = b64ToBytes(clean)
+                    if (b && b.length > 8) return b
+                }
+            } catch (e) {}
+            return a
+        }
     }
     return null
 }
@@ -85,15 +86,25 @@ async function fetchBin(url) {
             const res = await req(url, opt)
             // toHex 模式
             if (typeof res === 'string' && /^[0-9a-fA-F]{16,}$/.test(res.slice(0, 64).replace(/\s/g,''))) {
+                console.log('fetchBin hex mode len=' + res.length)
                 return hexToBytes(res.replace(/\s/g, ''))
             }
             if (res && typeof res.content === 'string' && opt.toHex && /^[0-9a-fA-F]+$/.test(res.content.slice(0, 32))) {
                 return hexToBytes(res.content)
             }
             const buf = getBuf(res)
-            if (buf && buf.length > 0) return buf
+            if (buf && buf.length > 0) {
+                console.log('fetchBin ok opt.buffer=' + (opt.buffer || 'none')
+                    + ' len=' + buf.length
+                    + ' hex=' + Array.prototype.slice.call(buf.subarray(0, Math.min(8, buf.length)))
+                        .map(function(b){ return (b < 16 ? '0' : '') + b.toString(16) }).join(''))
+                return buf
+            }
+            console.log('fetchBin empty opt.buffer=' + (opt.buffer || 'none')
+                + ' resType=' + (res === null ? 'null' : typeof res)
+                + (res && res.content ? ' contentType=' + typeof res.content + ' len=' + String(res.content).length : ''))
         } catch (e) {
-            console.log('fetchBin: ' + e)
+            console.log('fetchBin err: ' + e)
         }
     }
     return null
@@ -364,12 +375,14 @@ function rewriteM3u8(content, base) {
 async function resolvePayload(url) {
     const buf = await fetchBin(url)
     if (!buf) throw new Error('fetch empty: ' + url)
-    console.log('resolve len=' + buf.length + ' b0=' + buf[0].toString(16))
+    console.log('resolve len=' + buf.length + ' b0=0x' + buf[0].toString(16)
+        + ' isPng=' + isPng(buf))
     let body = buf
     if (isPng(buf)) {
         const payload = unpackRouPng(buf)
         if (!payload) throw new Error('no roUd')
         body = payload
+        console.log('unpack roUd ok len=' + body.length + ' head=' + utf8(body.subarray(0, Math.min(16, body.length))).replace(/\s+/g, ' '))
     }
     return body
 }
