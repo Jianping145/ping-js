@@ -86,6 +86,25 @@ function getBuf(res) {
     return null
 }
 
+/** gzip 魔数检测并解压（CDN 可能返回 gzip 压缩内容） */
+function maybeGunzip(bytes) {
+    if (!bytes || bytes.length < 2) return bytes
+    if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
+        console.log('gzip detected, len=' + bytes.length)
+        try {
+            const p = (typeof __pako !== 'undefined' && __pako) || null
+            if (p && p.ungzip) {
+                const out = p.ungzip(bytes)
+                console.log('gunzip ok, len=' + out.length)
+                return out instanceof Uint8Array ? out : new Uint8Array(out)
+            }
+        } catch (e) {
+            console.log('gunzip err: ' + e)
+        }
+    }
+    return bytes
+}
+
 async function fetchHtml(url) {
     const res = await req(url, { headers: hdr(), timeout: 12000 })
     return parseRes(res)
@@ -392,8 +411,9 @@ function rewriteM3u8(content, base) {
 
 /** 拉取并解包 PNG → 得到 m3u8 文本或 TS 字节 */
 async function resolvePayload(url) {
-    const buf = await fetchBin(url)
+    let buf = await fetchBin(url)
     if (!buf) throw new Error('fetch empty: ' + url)
+    buf = maybeGunzip(buf)  // CDN 可能返回 gzip
     console.log('resolve len=' + buf.length + ' b0=0x' + buf[0].toString(16)
         + ' isPng=' + isPng(buf))
     let body = buf
@@ -461,23 +481,9 @@ async function detail(ids) {
         let playUrl = extractEvPlayUrl(html)
         if (!playUrl) playUrl = extractNextData(html)
         if (!playUrl) playUrl = HOST + '/api/hls/' + id
-        // 诊断：预拉 m3u8，预览放简介
-        let preview = ''
-        try {
-            const body = await resolvePayload(playUrl)
-            const text = utf8(body)
-            if (text.indexOf('#EXT') === 0) {
-                preview = text.split('\n').slice(0, 12).join('\n')
-            } else {
-                preview = 'NOT_M3U8 len=' + body.length + ' head=' + utf8(body.subarray(0, Math.min(32, body.length)))
-            }
-        } catch (e) {
-            preview = 'FETCH_ERR: ' + e
-        }
         return JSON.stringify({
             list: [{
-                vod_id: id, vod_name: title, vod_pic: pic,
-                vod_content: preview || title,
+                vod_id: id, vod_name: title, vod_pic: pic, vod_content: title,
                 vod_play_from: '播放',
                 vod_play_url: '正片$' + playUrl,
             }],
@@ -584,6 +590,13 @@ async function proxy(params) {
         }
         // TS 分片魔数 0x47('G')
         if (body.length > 1 && body[0] === 0x47) {
+            // 长度异常：TS 分片不可能只有几字节
+            if (body.length < 100) {
+                const hex = Array.prototype.slice.call(body)
+                    .map(function(b){ return (b < 16 ? '0' : '') + b.toString(16) }).join('')
+                console.log('proxy ts TOO_SMALL len=' + body.length + ' hex=' + hex + ' url=' + raw.slice(0, 100))
+                return [500, 'text/plain', 'TS too small: ' + body.length + 'B hex=' + hex + ' url=' + raw.slice(0, 80)]
+            }
             const hex = Array.prototype.slice.call(body.subarray(0, Math.min(32, body.length)))
                 .map(function(b){ return (b < 16 ? '0' : '') + b.toString(16) }).join('')
             console.log('proxy ts len=' + body.length + ' hex=' + hex)
