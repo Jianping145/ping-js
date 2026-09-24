@@ -296,13 +296,19 @@ function extractNextData(html) {
 }
 
 function proxyPrefix() {
-    // 优先级：壳注入 > 带 key 的 9978
+    // 优先级对齐 Python 版：t4_api / getProxyUrl() > getProxy() > 默认 9978
+    try { if (typeof t4_api !== 'undefined' && t4_api && String(t4_api).indexOf('http') === 0) return String(t4_api).replace(/[?&]$/, '') } catch (e) {}
+    try { if (typeof getProxyUrl === 'function') { const p = getProxyUrl(); if (p && String(p).indexOf('http') === 0) return String(p).replace(/[?&]$/, '') } } catch (e) {}
     const candidates = []
     try { if (typeof getProxy === 'function') { const p = getProxy(true); if (p) candidates.push(String(p)) } } catch (e) {}
-    try { if (typeof getProxyUrl === 'function') { const p = getProxyUrl(); if (p) candidates.push(String(p)) } } catch (e) {}
-    try { if (typeof js2Proxy === 'function') { /* 有些环境是函数式 */ } } catch (e) {}
-    if (candidates.length) return candidates[0]
-    // T4 / 影视常见
+    try { if (typeof getProxy === 'function') { const p = getProxy(false); if (p) candidates.push(String(p)) } } catch (e) {}
+    if (candidates.length) {
+        let best = candidates[0]
+        if (best.indexOf('do=') < 0) {
+            best += (best.indexOf('?') >= 0 ? '&' : '?') + 'do=js&key=' + encodeURIComponent(SITE_KEY)
+        }
+        return best
+    }
     return 'http://127.0.0.1:9978/proxy?do=js&key=' + encodeURIComponent(SITE_KEY)
 }
 
@@ -423,32 +429,16 @@ async function play(flag, id, vipFlags) {
     const url = String(id || '')
     console.log('play in: ' + url)
     try {
-        // 需要解包的地址（PNG 伪装 或 api/hls）：在 play 阶段解包，m3u8 存缓存，通过 proxy 输出
+        // /api/hls/ 与 .png 是 PNG 包装 HLS，必须走代理解包（对齐 Python 版策略）
         if (/\/api\/hls\//i.test(url) || /\.png(\?|$)/i.test(url)) {
-            const body = await resolvePayload(url)
-            const head = utf8(body.subarray(0, Math.min(8, body.length)))
-            if (head.indexOf('#EXT') === 0) {
-                const text = utf8(body)
-                const base = url.replace(/[^/]*$/, '')
-                const m3u8 = rewriteM3u8(text, base)
-                const cacheUrl = cachePut(m3u8)
-                console.log('play cached m3u8 len=' + m3u8.length + ' -> ' + cacheUrl)
-                return JSON.stringify({
-                    parse: 0,
-                    url: toProxy(cacheUrl),
-                    header: JSON.stringify(hdr()),
-                })
-            }
-            console.log('play: payload not m3u8, fallback proxy')
-        }
-        // 其余（直链 m3u8 / ts）：走 proxy 或直连
-        if (/\.(png|m3u8|ts)(\?|$)/i.test(url) || /\/api\/hls\//i.test(url)) {
+            console.log('play proxy: ' + toProxy(url).slice(0, 160))
             return JSON.stringify({
                 parse: 0,
                 url: toProxy(url),
                 header: JSON.stringify(hdr()),
             })
         }
+        // 直链
         return JSON.stringify({ parse: 0, url: url, header: JSON.stringify(hdr()) })
     } catch (e) {
         console.log('play err: ' + e)
@@ -478,22 +468,25 @@ async function proxy(params) {
         if (typeof params === 'string') {
             try {
                 const q = new URLSearchParams(params)
-                params = { url: q.get('url'), target: q.get('target'), u: q.get('u'), path: q.get('path') }
+                params = { url: q.get('url'), target: q.get('target'), u: q.get('u'), path: q.get('path'), type: q.get('type') }
             } catch (e) {}
         }
         let raw = (params && (params.url || params.target || params.u || params.path)) || ''
         if (Array.isArray(raw)) raw = raw[0] || ''
-        if (!raw) return [400, 'text/plain', 'missing url']
+        if (!raw) return [400, 'text/plain', {'type': 'string'}, 'missing url']
         try { raw = decodeURIComponent(String(raw)) } catch (e) {}
 
-        // play 阶段解包并缓存的 m3u8
+        // play 阶段解包并缓存的 m3u8（保留兼容）
         if (raw.indexOf('roucache://') === 0) {
             const content = cacheGet(raw.slice('roucache://'.length))
             if (content) {
                 console.log('proxy cache hit len=' + content.length)
-                return [200, 'application/vnd.apple.mpegurl', content]
+                return [200, 'application/vnd.apple.mpegurl', content, {
+                    'Content-Type': 'application/vnd.apple.mpegurl',
+                    'Access-Control-Allow-Origin': '*',
+                }]
             }
-            return [404, 'text/plain', 'cache miss: ' + raw]
+            return [404, 'text/plain', {'type': 'string'}, 'cache miss: ' + raw]
         }
 
         // base64url token
@@ -512,18 +505,24 @@ async function proxy(params) {
         if (head.indexOf('#EXT') === 0) {
             const text = utf8(body)
             const m3u8 = rewriteM3u8(text, raw.replace(/[^/]*$/, ''))
-            return [200, 'application/vnd.apple.mpegurl', m3u8]
+            return [200, 'application/vnd.apple.mpegurl', m3u8, {
+                'Content-Type': 'application/vnd.apple.mpegurl',
+                'Access-Control-Allow-Origin': '*',
+            }]
         }
-        // TS 分片魔数 0x47('G')；不是则多半是错误页，直接返回 404 便于排查
+        // TS 分片魔数 0x47('G')
         if (body.length > 1 && body[0] === 0x47) {
             console.log('proxy ts ' + body.length)
-            return [200, 'video/mp2t', body]
+            return [200, 'video/MP2T', body, {
+                'Content-Type': 'video/MP2T',
+                'Access-Control-Allow-Origin': '*',
+            }]
         }
         console.log('proxy unknown content, head=' + head + ' len=' + body.length)
-        return [404, 'text/plain', 'not a media payload, head=' + head]
+        return [404, 'text/plain', {'type': 'string'}, 'not a media payload, head=' + head]
     } catch (e) {
         console.log('proxy err: ' + e)
-        return [500, 'text/plain', String(e)]
+        return [500, 'text/plain', str(e), {}]
     }
 }
 
