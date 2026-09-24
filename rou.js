@@ -437,10 +437,31 @@ async function search(wd, quick, pg) {
     try {
         if (!wd) return JSON.stringify({ list: [] })
         const page = parseInt(pg) || 1
-        const html = await fetchHtml(HOST + '/search?keyword=' + encodeURIComponent(wd) + '&page=' + page)
-        const list = parseList(html)
-        return JSON.stringify({ list, page, pagecount: list.length > 0 ? page + 1 : 1 })
+        const q = encodeURIComponent(String(wd).trim())
+        const urls = [
+            HOST + '/search?keyword=' + q + '&page=' + page,
+            HOST + '/search?q=' + q + '&page=' + page,
+            HOST + '/t/' + q + '?order=createdAt&page=' + page,
+        ]
+        let list = []
+        for (const url of urls) {
+            try {
+                console.log('search: ' + url)
+                const html = await fetchHtml(url)
+                if (!html || html.indexOf('Just a moment') >= 0) {
+                    console.log('search blocked or empty')
+                    continue
+                }
+                list = parseList(html)
+                console.log('search hits: ' + list.length)
+                if (list.length > 0) break
+            } catch (e) {
+                console.log('search try err: ' + e)
+            }
+        }
+        return JSON.stringify({ list: list, page: page, pagecount: list.length > 0 ? page + 1 : 1 })
     } catch (e) {
+        console.log('search err: ' + e)
         return JSON.stringify({ list: [] })
     }
 }
