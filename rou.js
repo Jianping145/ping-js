@@ -47,22 +47,39 @@ function getBuf(res) {
     if (typeof Uint8Array !== 'undefined' && res.data instanceof Uint8Array) return res.data
     if (Array.isArray(res.data)) return Uint8Array.from(res.data)
     if (res.body instanceof ArrayBuffer) return new Uint8Array(res.body)
-    // base64 字符串（content / data / buffer）
+    // 字符串：先判断是 base64 还是 latin1 二进制
     for (const key of ['content', 'data', 'buffer', 'body']) {
         const s = res[key]
         if (typeof s === 'string' && s.length > 16) {
-            // 先当 latin1 二进制
-            const a = new Uint8Array(s.length)
-            for (let i = 0; i < s.length; i++) a[i] = s.charCodeAt(i) & 0xff
-            if (a[0] === 0x89 || a[0] === 0x47 || a[0] === 0x23 || a[0] === 0x3c) return a
-            // 再试 base64 / base64url
+            // 先尝试 base64 解码（优先，避免 latin1 误判）
             try {
                 const clean = s.replace(/\s/g, '').replace(/-/g, '+').replace(/_/g, '/')
-                if (/^[A-Za-z0-9+/=]+$/.test(clean.slice(0, 100))) {
+                // base64 特征：长度是 4 的倍数（或补 = 后），字符集匹配
+                if (/^[A-Za-z0-9+/]+={0,2}$/.test(clean) && clean.length % 4 === 0) {
                     const b = b64ToBytes(clean)
-                    if (b && b.length > 8) return b
+                    if (b && b.length > 8) {
+                        // 验证解码后的魔数
+                        if (b[0] === 0x89 || b[0] === 0x47 || b[0] === 0x23 || b[0] === 0x3c || b[0] === 0xff || b[0] === 0x00) {
+                            console.log('getBuf base64 decoded len=' + b.length + ' b0=0x' + b[0].toString(16))
+                            return b
+                        }
+                    }
                 }
             } catch (e) {}
+            // 检测是否 UTF-8 解码过的字符串（含 >255 的 charCode）
+            let hasHigh = false
+            for (let i = 0; i < Math.min(s.length, 200); i++) {
+                if (s.charCodeAt(i) > 255) { hasHigh = true; break }
+            }
+            if (hasHigh) {
+                // UTF-8 解码的字符串，重新编码回原始字节
+                console.log('getBuf re-encode utf8 string len=' + s.length)
+                return utf8Bytes(s)
+            }
+            // 当 latin1 二进制
+            const a = new Uint8Array(s.length)
+            for (let i = 0; i < s.length; i++) a[i] = s.charCodeAt(i) & 0xff
+            console.log('getBuf latin1 len=' + a.length + ' b0=0x' + a[0].toString(16))
             return a
         }
     }
@@ -519,7 +536,7 @@ async function proxy(params) {
         }
         let raw = (params && (params.url || params.target || params.u || params.path)) || ''
         if (Array.isArray(raw)) raw = raw[0] || ''
-        if (!raw) return [400, 'text/plain', {'type': 'string'}, 'missing url']
+        if (!raw) return [400, 'text/plain', 'missing url']
         try { raw = decodeURIComponent(String(raw)) } catch (e) {}
 
         // play 阶段解包并缓存的 m3u8（保留兼容）
@@ -527,12 +544,9 @@ async function proxy(params) {
             const content = cacheGet(raw.slice('roucache://'.length))
             if (content) {
                 console.log('proxy cache hit len=' + content.length)
-                return [200, 'application/vnd.apple.mpegurl', content, {
-                    'Content-Type': 'application/vnd.apple.mpegurl',
-                    'Access-Control-Allow-Origin': '*',
-                }]
+                return [200, 'application/vnd.apple.mpegurl', content]
             }
-            return [404, 'text/plain', {'type': 'string'}, 'cache miss: ' + raw]
+            return [404, 'text/plain', 'cache miss: ' + raw]
         }
 
         // base64url token
@@ -551,24 +565,24 @@ async function proxy(params) {
         if (head.indexOf('#EXT') === 0) {
             const text = utf8(body)
             const m3u8 = rewriteM3u8(text, raw.replace(/[^/]*$/, ''))
-            return [200, 'application/vnd.apple.mpegurl', m3u8, {
-                'Content-Type': 'application/vnd.apple.mpegurl',
-                'Access-Control-Allow-Origin': '*',
-            }]
+            console.log('proxy m3u8 len=' + m3u8.length + ' lines=' + m3u8.split('\n').length)
+            return [200, 'application/vnd.apple.mpegurl', m3u8]
         }
         // TS 分片魔数 0x47('G')
         if (body.length > 1 && body[0] === 0x47) {
-            console.log('proxy ts ' + body.length)
-            return [200, 'video/MP2T', body, {
-                'Content-Type': 'video/MP2T',
-                'Access-Control-Allow-Origin': '*',
-            }]
+            const hex = Array.prototype.slice.call(body.subarray(0, Math.min(32, body.length)))
+                .map(function(b){ return (b < 16 ? '0' : '') + b.toString(16) }).join('')
+            console.log('proxy ts len=' + body.length + ' hex=' + hex)
+            // 构造全新 ArrayBuffer，避免壳不认识 Uint8Array/subarray
+            const ab = new ArrayBuffer(body.length)
+            new Uint8Array(ab).set(body)
+            return [200, 'video/MP2T', ab]
         }
         console.log('proxy unknown content, head=' + head + ' len=' + body.length)
-        return [404, 'text/plain', {'type': 'string'}, 'not a media payload, head=' + head]
+        return [404, 'text/plain', 'not a media payload, head=' + head]
     } catch (e) {
         console.log('proxy err: ' + e)
-        return [500, 'text/plain', String(e), {}]
+        return [500, 'text/plain', String(e)]
     }
 }
 
