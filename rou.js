@@ -111,36 +111,20 @@ async function fetchHtml(url) {
 }
 
 async function fetchBin(url) {
-    const opts = [
-        { headers: hdr(), timeout: 10000, buffer: 2 },
-        { headers: hdr(), timeout: 10000, buffer: 1 },
-        { headers: hdr(), timeout: 10000 },
-    ]
-    for (const opt of opts) {
-        try {
-            const res = await req(url, opt)
-            // toHex 模式
-            if (typeof res === 'string' && /^[0-9a-fA-F]{16,}$/.test(res.slice(0, 64).replace(/\s/g,''))) {
-                console.log('fetchBin hex mode len=' + res.length)
-                return hexToBytes(res.replace(/\s/g, ''))
-            }
-            if (res && typeof res.content === 'string' && opt.toHex && /^[0-9a-fA-F]+$/.test(res.content.slice(0, 32))) {
-                return hexToBytes(res.content)
-            }
-            const buf = getBuf(res)
-            if (buf && buf.length > 0) {
-                console.log('fetchBin ok opt.buffer=' + (opt.buffer || 'none')
-                    + ' len=' + buf.length
-                    + ' hex=' + Array.prototype.slice.call(buf.subarray(0, Math.min(8, buf.length)))
-                        .map(function(b){ return (b < 16 ? '0' : '') + b.toString(16) }).join(''))
-                return buf
-            }
-            console.log('fetchBin empty opt.buffer=' + (opt.buffer || 'none')
-                + ' resType=' + (res === null ? 'null' : typeof res)
-                + (res && res.content ? ' contentType=' + typeof res.content + ' len=' + String(res.content).length : ''))
-        } catch (e) {
-            console.log('fetchBin err: ' + e)
+    // 只用 1 个 opt，5 秒超时，避免卡住
+    const opt = { headers: hdr(), timeout: 5000, buffer: 2 }
+    try {
+        const res = await req(url, opt)
+        const buf = getBuf(res)
+        if (buf && buf.length > 0) {
+            console.log('fetchBin ok len=' + buf.length
+                + ' hex=' + Array.prototype.slice.call(buf.subarray(0, Math.min(8, buf.length)))
+                    .map(function(b){ return (b < 16 ? '0' : '') + b.toString(16) }).join(''))
+            return buf
         }
+        console.log('fetchBin empty resType=' + (res === null ? 'null' : typeof res))
+    } catch (e) {
+        console.log('fetchBin err: ' + e)
     }
     return null
 }
@@ -581,7 +565,13 @@ async function proxy(params) {
         if (raw.indexOf('/') === 0) raw = HOST + raw
         console.log('proxy: ' + raw.slice(0, 120))
 
-        const body = await resolvePayload(raw)
+        let body
+        try {
+            body = await resolvePayload(raw)
+        } catch (fetchErr) {
+            console.log('proxy fetch err: ' + fetchErr + ' url=' + raw.slice(0, 80))
+            return [502, 'text/plain', 'fetch failed: ' + fetchErr + ' url=' + raw.slice(0, 60)]
+        }
         const head = utf8(body.subarray(0, Math.min(8, body.length)))
         if (head.indexOf('#EXT') === 0) {
             const text = utf8(body)
