@@ -315,16 +315,33 @@ function proxyPrefix() {
 function toProxy(url) {
     const base = proxyPrefix()
     const join = base.indexOf('?') >= 0 ? '&' : '?'
-    // 多参数兼容：url / target / u
-    const token = bytesToB64(new TextEncoder ? new TextEncoder().encode(url) : (function() {
-        const a = new Uint8Array(url.length)
-        for (let i = 0; i < url.length; i++) a[i] = url.charCodeAt(i)
-        return a
-    })()).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+    // 多参数兼容：url / target / u（手动 UTF-8 编码，QuickJS 无 TextEncoder）
+    const token = bytesToB64(utf8Bytes(url)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
     return base + join + 'url=' + encodeURIComponent(url)
         + '&target=' + encodeURIComponent(url)
         + '&u=' + encodeURIComponent(token)
         + '&type=media'
+}
+
+/** 手动 UTF-8 编码（不依赖 TextEncoder，兼容 QuickJS） */
+function utf8Bytes(str) {
+    try {
+        if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(str)
+    } catch (e) {}
+    const out = []
+    for (let i = 0; i < str.length; i++) {
+        let c = str.charCodeAt(i)
+        if (c < 0x80) { out.push(c) }
+        else if (c < 0x800) { out.push(0xC0 | (c >> 6), 0x80 | (c & 0x3F)) }
+        else if (c >= 0xD800 && c <= 0xDBFF && i + 1 < str.length) {
+            const c2 = str.charCodeAt(++i)
+            c = 0x10000 + ((c & 0x3FF) << 10) | (c2 & 0x3FF)
+            out.push(0xF0 | (c >> 18), 0x80 | ((c >> 12) & 0x3F), 0x80 | ((c >> 6) & 0x3F), 0x80 | (c & 0x3F))
+        }
+        else if (c < 0x10000) { out.push(0xE0 | (c >> 12), 0x80 | ((c >> 6) & 0x3F), 0x80 | (c & 0x3F)) }
+        else { out.push(0xF0 | (c >> 18), 0x80 | ((c >> 12) & 0x3F), 0x80 | ((c >> 6) & 0x3F), 0x80 | (c & 0x3F)) }
+    }
+    return new Uint8Array(out)
 }
 
 function rewriteM3u8(content, base) {
@@ -442,11 +459,12 @@ async function play(flag, id, vipFlags) {
         return JSON.stringify({ parse: 0, url: url, header: JSON.stringify(hdr()) })
     } catch (e) {
         console.log('play err: ' + e)
-        return JSON.stringify({
-            parse: 0,
-            url: toProxy(url),
-            header: JSON.stringify(hdr()),
-        })
+        // 不再调 toProxy，避免二次异常；直接返回原始 URL 让壳尝试
+        try {
+            return JSON.stringify({ parse: 0, url: url, header: JSON.stringify(hdr()) })
+        } catch (e2) {
+            return JSON.stringify({ parse: 0, url: url })
+        }
     }
 }
 
@@ -462,14 +480,27 @@ async function search(wd, quick, pg) {
     }
 }
 
+/** 手动解析 query string（不依赖 URLSearchParams） */
+function parseQuery(qs) {
+    const out = {}
+    const s = String(qs).replace(/^\?/, '')
+    const parts = s.split('&')
+    for (const p of parts) {
+        if (!p) continue
+        const eq = p.indexOf('=')
+        if (eq < 0) { out[decodeURIComponent(p)] = ''; continue }
+        const k = decodeURIComponent(p.slice(0, eq))
+        const v = decodeURIComponent(p.slice(eq + 1).replace(/\+/g, ' '))
+        if (!(k in out)) out[k] = v
+    }
+    return out
+}
+
 async function proxy(params) {
     try {
-        // 有的壳直接传 query 字符串
+        // 有的壳直接传 query 字符串（手动解析，QuickJS 无 URLSearchParams）
         if (typeof params === 'string') {
-            try {
-                const q = new URLSearchParams(params)
-                params = { url: q.get('url'), target: q.get('target'), u: q.get('u'), path: q.get('path'), type: q.get('type') }
-            } catch (e) {}
+            params = parseQuery(params)
         }
         let raw = (params && (params.url || params.target || params.u || params.path)) || ''
         if (Array.isArray(raw)) raw = raw[0] || ''
@@ -522,7 +553,7 @@ async function proxy(params) {
         return [404, 'text/plain', {'type': 'string'}, 'not a media payload, head=' + head]
     } catch (e) {
         console.log('proxy err: ' + e)
-        return [500, 'text/plain', str(e), {}]
+        return [500, 'text/plain', String(e), {}]
     }
 }
 
