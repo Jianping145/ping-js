@@ -70,16 +70,15 @@ function getBuf(res) {
 }
 
 async function fetchHtml(url) {
-    const res = await req(url, { headers: hdr(), timeout: 20000 })
+    const res = await req(url, { headers: hdr(), timeout: 12000 })
     return parseRes(res)
 }
 
 async function fetchBin(url) {
     const opts = [
-        { headers: hdr(), timeout: 30000, buffer: 2 },
-        { headers: hdr(), timeout: 30000, buffer: 1 },
-        { headers: hdr(), timeout: 30000, toHex: true },
-        { headers: hdr(), timeout: 30000 },
+        { headers: hdr(), timeout: 10000, buffer: 2 },
+        { headers: hdr(), timeout: 10000, buffer: 1 },
+        { headers: hdr(), timeout: 10000 },
     ]
     for (const opt of opts) {
         try {
@@ -308,16 +307,19 @@ function extractNextData(html) {
 
 function proxyPrefix() {
     // 优先级对齐 Python 版：t4_api / getProxyUrl() > getProxy() > 默认 9978
-    try { if (typeof t4_api !== 'undefined' && t4_api && String(t4_api).indexOf('http') === 0) return String(t4_api).replace(/[?&]$/, '') } catch (e) {}
-    try { if (typeof getProxyUrl === 'function') { const p = getProxyUrl(); if (p && String(p).indexOf('http') === 0) return String(p).replace(/[?&]$/, '') } } catch (e) {}
-    const candidates = []
-    try { if (typeof getProxy === 'function') { const p = getProxy(true); if (p) candidates.push(String(p)) } } catch (e) {}
-    try { if (typeof getProxy === 'function') { const p = getProxy(false); if (p) candidates.push(String(p)) } } catch (e) {}
-    if (candidates.length) {
-        let best = candidates[0]
-        if (best.indexOf('do=') < 0) {
-            best += (best.indexOf('?') >= 0 ? '&' : '?') + 'do=js&key=' + encodeURIComponent(SITE_KEY)
-        }
+    const cands = []
+    try { if (typeof t4_api !== 'undefined' && t4_api && String(t4_api).indexOf('http') === 0) cands.push(String(t4_api)) } catch (e) {}
+    try { if (typeof getProxyUrl === 'function') { const p = getProxyUrl(); if (p && String(p).indexOf('http') === 0) cands.push(String(p)) } } catch (e) {}
+    try { if (typeof getProxy === 'function') { const p = getProxy(true); if (p) cands.push(String(p)) } } catch (e) {}
+    try { if (typeof getProxy === 'function') { const p = getProxy(false); if (p) cands.push(String(p)) } } catch (e) {}
+    for (let best of cands) {
+        best = best.replace(/[?&]$/, '')
+        // 必须带 do= 和 key=，否则补全
+        const join = best.indexOf('?') >= 0 ? '&' : '?'
+        let need = []
+        if (best.indexOf('do=') < 0) need.push('do=js')
+        if (best.indexOf('key=') < 0) need.push('key=' + encodeURIComponent(SITE_KEY))
+        if (need.length) best += join + need.join('&')
         return best
     }
     return 'http://127.0.0.1:9978/proxy?do=js&key=' + encodeURIComponent(SITE_KEY)
