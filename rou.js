@@ -554,7 +554,8 @@ async function proxy(params) {
         if (typeof params === 'string') {
             params = parseQuery(params)
         }
-        let raw = (params && (params.url || params.target || params.u || params.path)) || ''
+        // 优先取 u（base64 完整 URL），避免 query 参数 & 截断
+        let raw = (params && (params.u || params.url || params.target || params.path)) || ''
         if (Array.isArray(raw)) raw = raw[0] || ''
         if (!raw) return [400, 'text/plain', 'missing url']
         try { raw = decodeURIComponent(String(raw)) } catch (e) {}
