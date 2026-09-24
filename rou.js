@@ -461,9 +461,23 @@ async function detail(ids) {
         let playUrl = extractEvPlayUrl(html)
         if (!playUrl) playUrl = extractNextData(html)
         if (!playUrl) playUrl = HOST + '/api/hls/' + id
+        // 诊断：预拉 m3u8，预览放简介
+        let preview = ''
+        try {
+            const body = await resolvePayload(playUrl)
+            const text = utf8(body)
+            if (text.indexOf('#EXT') === 0) {
+                preview = text.split('\n').slice(0, 12).join('\n')
+            } else {
+                preview = 'NOT_M3U8 len=' + body.length + ' head=' + utf8(body.subarray(0, Math.min(32, body.length)))
+            }
+        } catch (e) {
+            preview = 'FETCH_ERR: ' + e
+        }
         return JSON.stringify({
             list: [{
-                vod_id: id, vod_name: title, vod_pic: pic, vod_content: title,
+                vod_id: id, vod_name: title, vod_pic: pic,
+                vod_content: preview || title,
                 vod_play_from: '播放',
                 vod_play_url: '正片$' + playUrl,
             }],
