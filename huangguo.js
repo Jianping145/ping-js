@@ -1,337 +1,767 @@
-// 黄果短剧 huangguoai.com
-// HTML 刮削源：首頁/分類/搜尋皆為 .hg-card-grid > .hg-drama-card 卡片；
-// 排行榜為 .hg-rank-list > .hg-rank-item；詳情頁 .hg-web-detail__ep-grid 給集數；
-// 播放頁 <script id="videoInitialData"> 內嵌 JSON，epPlaySrcs[集數] / videoSrc 直接給 m3u8。
-// 圖片解密方法：
-//   站點封面圖是 AES-128-CBC 加密位元組，key/iv 取自站點前端 crypto-worker.js：
-//     key = f5d965df75336270  (hex)  iv = 97b60394abc2fbe1  (hex)  均為 UTF-8 16 bytes
-//   解密流程（AES.new(key, MODE_CBC, iv).decrypt(raw)）：
-//     a. raw 為空或 len%16 != 0 → 原樣回傳
-//     b. 解密後若开頭不是圖片簽名 → 源圖根本沒加密，原樣回傳
-//        （合法簽名：JPEG \xff\xd8 / PNG \x89PNG\r\n\x1a\n / WEBP RIFF\x00\x00\x00WEBP / GIF87a|GIF89a）
-//     c. 剝離 PKCS7 padding（末字節 pad，1<=pad<=16 且末 pad 字節同值）
-//     d. 收尾截斷：JPEG 留到最後一個 \xff\xd9；PNG 留到 IEND 的 +8 bytes
-//   不足 16 或未加密 → 原樣輸出。故 XPTV 端無解密能力，vod_pic 直接放剝掉 auth_key 的原始 URL，
-//   加密圖位元組的解密代理由 XPTV 外部（本地代理層）負責。
+// 黄果短剧 - 蜂蜜影视 / CatVod / T4 标准版
 
-// 圖片解密（CryptoJS 寫法）
-//   站點封面圖為 AES-128-CBC 加密位元組，key/iv 取自前端 crypto-worker.js 的 UTF-8 16 bytes：
-//     key = f5d965df75336270   iv = 97b60394abc2fbe1
-//   密文 raw 需先轉 CryptoJS WordArray（圖片響應位元組），非加密或長度非 16 倍數 → 原樣回傳：
-//
-//   const _IMG_KEY = CryptoJS.enc.Hex.parse('f5d965df75336270');
-//   const _IMG_IV  = CryptoJS.enc.Hex.parse('97b60394abc2fbe1');
-//   function decryptImg(raw) {
-//     if (!raw || raw.sigBytes % 16 !== 0) return raw;
-//     let pt;
-//     try {
-//       pt = CryptoJS.AES.decrypt(
-//         { ciphertext: raw }, _IMG_KEY,
-//         { iv: _IMG_IV, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.NoPadding });
-//     } catch (e) { return raw; }
-//     let hex = CryptoJS.enc.Hex.stringify(pt).toLowerCase();
-//     // 開頭若不是圖片簽名 → 源圖根本沒加密，原樣回傳（JPEG/PNG/WEBP/GIF）
-//     if (!(hex.indexOf('ffd8') === 0 || hex.indexOf('89504e470d0a1a0a') === 0 ||
-//           (hex.indexOf('52494646') === 0 && hex.indexOf('57454250') === 8) ||
-//           hex.indexOf('47494638') === 0)) return raw;
-//     // 剝離 PKCS7 padding（末字節 pad，1<=pad<=16 且末 pad 字節同值）
-//     const pad = parseInt(hex.slice(-2), 16);
-//     if (pad > 0 && pad <= 16) {
-//       const b = pad.toString(16).padStart(2, '0');
-//       let ok = true;
-//       for (let i = hex.length - pad * 2; i < hex.length; i += 2)
-//         if (hex.slice(i, i + 2) !== b) { ok = false; break; }
-//       if (ok) { hex = hex.slice(0, -pad * 2); }
-//     }
-//     // 收尾截斷：JPEG 留到最後 \xff\xd9；PNG 留到 IEND 的 +8 bytes（\x89PNG...IEND）
-//     let i = hex.lastIndexOf('ffd9');
-//     if (i !== -1) hex = hex.slice(0, i + 4);
-//     else { i = hex.lastIndexOf('49454e44ae426082'); if (i !== -1) hex = hex.slice(0, i + 16); }
-//     return CryptoJS.lib.WordArray.create(CryptoJS.enc.Hex.parse(hex).words, hex.length / 2);
-//   }
+// 封面为 AES 加密图，T4 无法直接解密，故 vod_pic 置空（显示默认占位图）
 
-const UA =
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+
 const SITE = 'https://huangguoai.com'
 
 const HEADERS = {
+
     'User-Agent': UA,
-    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+
     'Accept-Language': 'zh-CN,zh;q=0.9',
-    Referer: SITE + '/',
+
+    'Referer': SITE + '/',
+
 }
 
-const TABS = [
-    { name: '首页', id: 'home' },
-    { name: 'AI成人短剧', id: 'ai-duanju' },
-    { name: 'AI成人漫剧', id: 'ai-manju' },
-    { name: 'AI换脸', id: 'ai-huanlian' },
-    { name: 'AI魔改', id: 'ai-mogai' },
-    { name: '排行榜', id: 'ranks/hot' },
-]
+const CLASS_MAP = {
 
-// ---------- 工具 ----------
+    '首页': 'home',
+
+    'AI成人短剧': 'ai-duanju',
+
+    'AI成人漫剧': 'ai-manju',
+
+    'AI换脸': 'ai-huanlian',
+
+    'AI魔改': 'ai-mogai',
+
+    '排行榜': 'ranks/hot',
+
+}
+
+function log(msg) {
+
+    console.log('[黄果短剧] ' + msg)
+
+}
+
 function fix(u) {
-    if (!u) return ''
-    if (u.indexOf('//') === 0) return 'https:' + u
-    if (u.indexOf('/') === 0) return SITE + u
-    return u
-}
 
-function imgSrc(u) {
-    // 剔除 CDN 防盗链 auth_key 等查询参数，得到不过期的稳定直链
-    u = fix(u || '')
-    if (u.indexOf('http') === 0 && u.indexOf('?') !== -1) {
-        u = u.replace(/\?.*/, '')
-    }
+    if (!u) return ''
+
+    if (u.indexOf('//') === 0) return 'https:' + u
+
+    if (u.indexOf('/') === 0) return SITE + u
+
     return u
+
 }
 
 function stripTags(s) {
-    return String(s || '')
-        .replace(/<[^>]*>/g, '')
-        .trim()
+
+    return String(s || '').replace(/<[^>]*>/g, '').trim()
+
 }
 
-async function fetchHtml(url, referer) {
-    const headers = referer ? Object.assign({}, HEADERS, { Referer: referer }) : HEADERS
-    const resp = await $fetch.get(url, { headers })
-    const data = resp && resp.data
-    return typeof data === 'string' ? data : data == null ? '' : JSON.stringify(data)
+// 封面处理：加密图直接返回空，避免 Invalid image data 报错
+
+function imgSrc(u) {
+
+    u = fix(u || '')
+
+    if (!u || u.indexOf('<') !== -1) return ''
+
+    // 黄果加密图域名，T4 无法解密，直接置空
+
+    if (u.indexOf('pic.fisawck.cn') !== -1 || u.indexOf('fisawck') !== -1) {
+
+        return ''
+
+    }
+
+    if (u.indexOf('cover-placeholder') !== -1) return ''
+
+    return u
+
+}
+
+async function http(url, referer) {
+
+    const headers = Object.assign({}, HEADERS)
+
+    if (referer) headers['Referer'] = referer
+
+    try {
+
+        const res = await req(url, {
+
+            method: 'get',
+
+            headers: headers,
+
+            timeout: 15000,
+
+        })
+
+        if (typeof res === 'string') return res
+
+        if (res && res.content) return res.content
+
+        if (res && res.data) return res.data
+
+        return res || ''
+
+    } catch (e) {
+
+        log('http error: ' + e)
+
+        throw e
+
+    }
+
 }
 
 // ---------- 卡片解析 ----------
+
 function gridSlices(html, allGrids) {
-    // .hg-card-grid 區塊；allGrids=true 取全部，否則只取第一個（主列表）
+
     const re = /<div\s+class="[^"]*\bhg-card-grid\b[^"]*"[^>]*>/g
+
     const starts = []
+
     let m
+
     while ((m = re.exec(html)) !== null) starts.push(m.index + m[0].length)
+
     if (!starts.length) return []
+
     const slices = []
+
     const n = allGrids ? starts.length : Math.min(1, starts.length)
+
     for (let i = 0; i < n; i++) {
+
         const to = i + 1 < starts.length ? starts[i + 1] : html.length
+
         slices.push(html.slice(starts[i], to))
+
     }
+
     return slices
+
 }
 
 function cardBlocks(slice) {
+
     const re = /<div\s+class="[^"]*\bhg-drama-card\b[^"]*"[^>]*>/g
+
     const starts = []
+
     let m
-    while ((m = re.exec(slice)) !== null) starts.push(m.index + m[0].length)
+
+    while ((m = re.exec(slice)) !== null) starts.push(m.index)
+
     const blocks = []
+
     for (let i = 0; i < starts.length; i++) {
+
         const to = i + 1 < starts.length ? starts[i + 1] : slice.length
+
         blocks.push(slice.slice(starts[i], to))
+
     }
+
     return blocks
+
 }
 
 function parseCardBlock(block) {
+
     const a = block.match(/href="[^"]*\/detail\/(\d+)\/[^"]*"/)
+
     if (!a) return null
+
     const vid = a[1]
-    const imgM = block.match(/data-src="([^"]+)"/) || block.match(/src="([^"]+)"/)
+
+    // 封面（加密图会被 imgSrc 置空）
+
+    let pic = ''
+
+    const dataSrcList = block.match(/data-src="([^"]+)"/g) || []
+
+    for (let i = 0; i < dataSrcList.length; i++) {
+
+        const m = dataSrcList[i].match(/data-src="([^"]+)"/)
+
+        if (!m) continue
+
+        const u = m[1]
+
+        if (/\.(jpe?g|png|webp|gif)/i.test(u) || u.indexOf('upload') !== -1) {
+
+            pic = imgSrc(u)
+
+            if (pic) break
+
+        }
+
+    }
+
+    // 标题
+
     let title = ''
+
     const t = block.match(/hg-drama-card__title[^>]*>([\s\S]*?)<\/a>/)
+
     if (t) title = stripTags(t[1])
+
     if (!title) {
+
         const tt = block.match(/<a[^>]+href="[^"]*\/detail\/\d+\/"[^>]*>([\s\S]*?)<\/a>/)
+
         if (tt) title = stripTags(tt[1])
+
     }
+
     if (!title) return null
+
+    // 集数 / 评分
+
     const ep = block.match(/hg-drama-card__episode[^>]*>([\s\S]*?)<\/span>/)
+
     const score = block.match(/hg-drama-card__score[^>]*>([\s\S]*?)<\/span>/)
-    const rem = ep ? ep[1].trim() : ''
-    const sc = score ? score[1].trim() : ''
+
+    const rem = ep ? stripTags(ep[1]) : ''
+
+    const sc = score ? stripTags(score[1]) : ''
+
     let remarks = ''
+
     if (rem && sc) remarks = rem + ' · ' + sc
+
     else remarks = rem || sc
+
     return {
+
         vod_id: vid,
+
         vod_name: title,
-        vod_pic: imgSrc(imgM ? imgM[1] : ''),
+
+        vod_pic: pic,
+
         vod_remarks: remarks,
-        ext: { id: vid },
+
     }
+
 }
 
 function parseGridCards(html, allGrids) {
+
     if (!html) return []
+
     const list = []
+
     const seen = {}
+
     const slices = gridSlices(html, allGrids)
+
     for (const slice of slices) {
+
         for (const block of cardBlocks(slice)) {
+
             try {
+
                 const item = parseCardBlock(block)
+
                 if (!item || seen[item.vod_id]) continue
+
                 seen[item.vod_id] = true
+
                 list.push(item)
+
             } catch (e) {}
+
         }
+
     }
+
+    log('解析到 ' + list.length + ' 个')
+
     return list
+
 }
 
-// ---------- 排行榜解析 ----------
 function parseRanks(html) {
+
     if (!html) return []
+
     const listM = html.match(/<div\s+class="[^"]*\bhg-rank-list\b[^"]*"[^>]*>/)
+
     const from = listM ? listM.index + listM[0].length : 0
+
     const slice = html.slice(from)
+
     const re = /<div\s+class="[^"]*\bhg-rank-item\b[^"]*"[^>]*>/g
+
     const starts = []
+
     let m
-    while ((m = re.exec(slice)) !== null) starts.push(m.index + m[0].length)
+
+    while ((m = re.exec(slice)) !== null) starts.push(m.index)
+
     const list = []
+
     const seen = {}
+
     for (let i = 0; i < starts.length; i++) {
+
         const to = i + 1 < starts.length ? starts[i + 1] : slice.length
+
         const block = slice.slice(starts[i], to)
+
         try {
+
             const a = block.match(/href="[^"]*\/detail\/(\d+)\/[^"]*"/)
+
             if (!a || seen[a[1]]) continue
+
             seen[a[1]] = true
-            const imgM = block.match(/data-src="([^"]+)"/) || block.match(/src="([^"]+)"/)
+
+            let pic = ''
+
+            const dataSrcList = block.match(/data-src="([^"]+)"/g) || []
+
+            for (let j = 0; j < dataSrcList.length; j++) {
+
+                const mm = dataSrcList[j].match(/data-src="([^"]+)"/)
+
+                if (mm && (/\.(jpe?g|png|webp)/i.test(mm[1]) || mm[1].indexOf('upload') !== -1)) {
+
+                    pic = imgSrc(mm[1])
+
+                    if (pic) break
+
+                }
+
+            }
+
             let title = ''
+
             const t = block.match(/hg-rank-item__title[^>]*>([\s\S]*?)<\/h2>/)
+
             if (t) title = stripTags(t[1])
+
             if (!title) {
+
                 const tt = block.match(/<a[^>]+href="[^"]*\/detail\/\d+\/"[^>]*>([\s\S]*?)<\/a>/)
+
                 if (tt) title = stripTags(tt[1])
+
             }
+
             if (!title) continue
+
             const tags = block.match(/hg-rank-item__tags[^>]*>([\s\S]*?)<\/div>/)
+
             list.push({
+
                 vod_id: a[1],
+
                 vod_name: title,
-                vod_pic: imgSrc(imgM ? imgM[1] : ''),
+
+                vod_pic: pic,
+
                 vod_remarks: tags ? stripTags(tags[1]) : '',
-                ext: { id: a[1] },
+
             })
+
         } catch (e) {}
+
     }
+
     return list
+
 }
 
-// ---------- 介面 ----------
-async function getLocalInfo() {
-    return jsonify({ ver: 1, name: '黄果短剧', api: 'csp_huangguo', type: 3 })
+// ===== T4 标准接口 =====
+
+async function init(cfg) {
+
+    log('init')
+
+    return JSON.stringify({ code: 0, msg: 'success' })
+
 }
 
-async function getConfig() {
-    return jsonify({
-        ver: 1,
-        title: '黄果短剧',
-        site: SITE,
-        tabs: TABS.map((t) => ({ name: t.name, ext: { id: t.id } })),
-    })
-}
+async function home(filter) {
 
-async function getCards(ext) {
-    ext = argsify(ext)
-    const id = String(ext.id || 'home').replace(/^\//, '')
-    const page = Math.max(1, parseInt(ext.page) || 1)
-    try {
-        if (id === 'home') {
-            const html = await fetchHtml(SITE + '/')
-            return jsonify({ list: parseGridCards(html, true), page: page })
-        }
-        const url = SITE + '/' + id + '/' + (page > 1 ? page + '/' : '')
-        const html = await fetchHtml(url)
-        if (id.indexOf('rank') !== -1) {
-            return jsonify({ list: parseRanks(html), page: page })
-        }
-        return jsonify({ list: parseGridCards(html, false), page: page })
-    } catch (e) {
-        console.error('getCards error:', e)
-        return jsonify({ list: [], page: page })
-    }
-}
+    log('home')
 
-async function getTracks(ext) {
-    ext = argsify(ext)
-    const id = ext.id || ''
-    if (!id) return jsonify({ list: [] })
-    try {
-        const html = await fetchHtml(SITE + '/detail/' + id + '/')
-        const tracks = []
-        const gridM = html.match(/<div\s+class="[^"]*\bhg-web-detail__ep-grid\b[^"]*"[^>]*>([\s\S]*?)<\/div>/)
-        if (gridM) {
-            const are = /<a\b[^>]*>[\s\S]*?<\/a>/g
-            let m
-            while ((m = are.exec(gridM[1])) !== null) {
-                const tag = m[0]
-                const hrefM = tag.match(/href="([^"]+)"/)
-                if (!hrefM) continue
-                const href = hrefM[1]
-                const eidM = tag.match(/data-ep-id="([^"]*)"/)
-                const eid = eidM ? eidM[1] : ''
-                const name = eid ? '第' + eid + '集' : stripTags(tag)
-                tracks.push({ name: name, ext: { url: fix(href), ep: eid } })
-            }
-        }
-        if (!tracks.length) {
-            const playM = html.match(/<a\b[^>]*class="[^"]*\bhg-web-detail__play\b[^"]*"[^>]*href="([^"]+)"/)
-            if (playM) {
-                tracks.push({ name: '第1集', ext: { url: fix(playM[1]), ep: '' } })
-            }
-        }
-        if (!tracks.length) return jsonify({ list: [] })
-        return jsonify({ list: [{ title: '黄果短剧', tracks: tracks }] })
-    } catch (e) {
-        console.error('getTracks error:', e)
-        return jsonify({ list: [] })
-    }
-}
+    const classes = []
 
-async function getPlayinfo(ext) {
-    ext = argsify(ext)
-    const url = ext.url || ''
-    const ep = String(ext.ep || '1')
-    if (!url) return jsonify({ urls: [] })
-    try {
-        const html = await fetchHtml(url, SITE)
-        let play = ''
-        const m = html.match(/id="videoInitialData"[^>]*>([\s\S]*?)<\/script>/)
-        if (m) {
-            try {
-                const data = JSON.parse(m[1])
-                const srcs = (data && data.epPlaySrcs) || {}
-                play = srcs[ep] || (data && data.videoSrc) || ''
-            } catch (e) {}
-        }
-        if (play) {
-            play = play.replace(/\\u0026/g, '&')
-            if (play.indexOf('http') !== 0) {
-                const mm = play.match(/(https?:\/\/[^\s"']+)/)
-                play = mm ? mm[1] : ''
-            }
-        }
-        if (!play) return jsonify({ urls: [] })
-        return jsonify({
-            urls: [play],
-            headers: [{ 'User-Agent': UA, Referer: SITE + '/' }],
+    for (const name in CLASS_MAP) {
+
+        classes.push({
+
+            type_id: CLASS_MAP[name],
+
+            type_name: name,
+
         })
-    } catch (e) {
-        console.error('getPlayinfo error:', e)
-        return jsonify({ urls: [] })
+
     }
+
+    return JSON.stringify({ class: classes })
+
 }
 
-async function search(ext) {
-    ext = argsify(ext)
-    const kw = String(ext.text || ext.wd || '').trim()
-    if (!kw) return jsonify({ list: [], page: 1 })
+async function homeContent(filter) {
+
+    return await home(filter)
+
+}
+
+async function homeVod() {
+
+    return await category('home', '1', false, {})
+
+}
+
+async function category(tid, pg, filter, extend) {
+
     try {
-        const html = await fetchHtml(SITE + '/search/video/' + encodeURIComponent(kw) + '/')
-        return jsonify({ list: parseGridCards(html, false), page: 1 })
+
+        const page = parseInt(pg) || 1
+
+        let id = String(tid || 'home').replace(/^\//, '')
+
+        log('category id=' + id + ' page=' + page)
+
+        let html = ''
+
+        let list = []
+
+        if (id === 'home') {
+
+            html = await http(SITE + '/')
+
+            list = parseGridCards(html, true)
+
+        } else {
+
+            const url = SITE + '/' + id + '/' + (page > 1 ? page + '/' : '')
+
+            html = await http(url)
+
+            if (id.indexOf('rank') !== -1) {
+
+                list = parseRanks(html)
+
+            } else {
+
+                list = parseGridCards(html, false)
+
+            }
+
+        }
+
+        return JSON.stringify({
+
+            list: list,
+
+            page: page,
+
+            pagecount: 999,
+
+            limit: 24,
+
+            total: 999999,
+
+        })
+
     } catch (e) {
-        console.error('search error:', e)
-        return jsonify({ list: [], page: 1 })
+
+        log('category error: ' + e)
+
+        return JSON.stringify({ list: [], page: 1, pagecount: 1, total: 0 })
+
     }
+
+}
+
+async function categoryContent(tid, pg, filter, extend) {
+
+    return await category(tid, pg, filter, extend)
+
+}
+
+async function detail(ids) {
+
+    try {
+
+        const vid = Array.isArray(ids) ? ids[0] : ids
+
+        if (!vid) return JSON.stringify({ list: [] })
+
+        log('detail id=' + vid)
+
+        const html = await http(SITE + '/detail/' + vid + '/')
+
+        let title = '未知'
+
+        const titleM = html.match(/<h1[^>]*class="[^"]*hg-web-detail__title[^"]*"[^>]*>([\s\S]*?)<\/h1>/i) ||
+
+                       html.match(/<title>([\s\S]*?)<\/title>/i)
+
+        if (titleM) title = stripTags(titleM[1]).split('-')[0].trim()
+
+        let pic = ''
+
+        const picM = html.match(/og:image[^>]*content="([^"]+)"/i)
+
+        if (picM) pic = imgSrc(picM[1])
+
+        const tracks = []
+
+        const gridM = html.match(/<div\s+class="[^"]*\bhg-web-detail__ep-grid\b[^"]*"[^>]*>([\s\S]*?)<\/div>/)
+
+        if (gridM) {
+
+            const are = /<a\b[^>]*>[\s\S]*?<\/a>/g
+
+            let m
+
+            while ((m = are.exec(gridM[1])) !== null) {
+
+                const tag = m[0]
+
+                const hrefM = tag.match(/href="([^"]+)"/)
+
+                if (!hrefM) continue
+
+                const href = fix(hrefM[1])
+
+                const eidM = tag.match(/data-ep-id="([^"]*)"/)
+
+                const eid = eidM ? eidM[1] : ''
+
+                const name = eid ? '第' + eid + '集' : stripTags(tag)
+
+                tracks.push(name + '$' + href + '|' + eid)
+
+            }
+
+        }
+
+        if (!tracks.length) {
+
+            const playM = html.match(/<a\b[^>]*class="[^"]*\bhg-web-detail__play\b[^"]*"[^>]*href="([^"]+)"/)
+
+            if (playM) {
+
+                tracks.push('第1集$' + fix(playM[1]) + '|1')
+
+            }
+
+        }
+
+        if (!tracks.length) return JSON.stringify({ list: [] })
+
+        return JSON.stringify({
+
+            list: [{
+
+                vod_id: vid,
+
+                vod_name: title,
+
+                vod_pic: pic,
+
+                vod_play_from: '黄果短剧',
+
+                vod_play_url: tracks.join('#'),
+
+                vod_content: title,
+
+            }]
+
+        })
+
+    } catch (e) {
+
+        log('detail error: ' + e)
+
+        return JSON.stringify({ list: [] })
+
+    }
+
+}
+
+async function detailContent(ids) {
+
+    return await detail(ids)
+
+}
+
+async function play(flag, id, vipFlags) {
+
+    try {
+
+        log('play id=' + id)
+
+        let playUrl = id
+
+        let ep = '1'
+
+        if (id.indexOf('|') !== -1) {
+
+            const parts = id.split('|')
+
+            playUrl = parts[0]
+
+            ep = parts[1] || '1'
+
+        }
+
+        const html = await http(playUrl, SITE)
+
+        let realUrl = ''
+
+        const m = html.match(/id="videoInitialData"[^>]*>([\s\S]*?)<\/script>/)
+
+        if (m) {
+
+            try {
+
+                const data = JSON.parse(m[1])
+
+                const srcs = (data && data.epPlaySrcs) || {}
+
+                realUrl = srcs[ep] || (data && data.videoSrc) || ''
+
+            } catch (e) {}
+
+        }
+
+        if (realUrl) {
+
+            realUrl = realUrl.replace(/\\u0026/g, '&')
+
+            if (realUrl.indexOf('http') !== 0) {
+
+                const mm = realUrl.match(/(https?:\/\/[^\s"']+)/)
+
+                realUrl = mm ? mm[1] : ''
+
+            }
+
+        }
+
+        if (!realUrl) {
+
+            return JSON.stringify({
+
+                parse: 1,
+
+                url: playUrl,
+
+                header: JSON.stringify({
+
+                    'User-Agent': UA,
+
+                    'Referer': SITE + '/',
+
+                }),
+
+            })
+
+        }
+
+        return JSON.stringify({
+
+            parse: 0,
+
+            url: realUrl,
+
+            header: JSON.stringify({
+
+                'User-Agent': UA,
+
+                'Referer': SITE + '/',
+
+            }),
+
+        })
+
+    } catch (e) {
+
+        log('play error: ' + e)
+
+        return JSON.stringify({ url: '' })
+
+    }
+
+}
+
+async function playerContent(flag, id, vipFlags) {
+
+    return await play(flag, id, vipFlags)
+
+}
+
+async function search(wd, quick) {
+
+    try {
+
+        if (!wd) return JSON.stringify({ list: [] })
+
+        log('search ' + wd)
+
+        const html = await http(SITE + '/search/video/' + encodeURIComponent(wd.trim()) + '/')
+
+        const list = parseGridCards(html, false)
+
+        return JSON.stringify({ list: list })
+
+    } catch (e) {
+
+        log('search error: ' + e)
+
+        return JSON.stringify({ list: [] })
+
+    }
+
+}
+
+async function searchContent(wd, quick, pg) {
+
+    return await search(wd, quick)
+
+}
+
+export function __jsEvalReturn() {
+
+    return {
+
+        init: init,
+
+        home: home,
+
+        homeContent: homeContent,
+
+        homeVod: homeVod,
+
+        category: category,
+
+        categoryContent: categoryContent,
+
+        detail: detail,
+
+        detailContent: detailContent,
+
+        play: play,
+
+        playerContent: playerContent,
+
+        search: search,
+
+        searchContent: searchContent,
+
+    }
+
 }
