@@ -221,12 +221,20 @@ async function detail(ids) {
         if (picM) pic = picM[1]
 
         var playUrl = ''
-        var linkM = html.match(/<link\s+rel=["']preload["']\s+as=["']fetch["'][^>]*href=["']([^"']+)["']/i)
+        // 更灵活地匹配preload link
+        var linkM = html.match(/<link[^>]*rel=["']preload["'][^>]*href=["']([^"']*m3u8[^"']*)["']/i)
+        if (!linkM) linkM = html.match(/href=["']([^"']*m3u8[^"']*)["']/i)
         if (linkM) playUrl = linkM[1]
 
         var playUrls = []
         if (playUrl) {
-            playUrls.push('多音画$666_' + playUrl)
+            // 提供多个分辨率
+            var qualities = ['2160p', '1080p', '720p', '480p', '360p', '240p']
+            for (var i = 0; i < qualities.length; i++) {
+                var q = qualities[i]
+                var qUrl = playUrl.replace('_TPL_', q)
+                playUrls.push(q + '$666_' + qUrl)
+            }
         } else {
             playUrls.push('嗅探$' + url)
         }
@@ -262,6 +270,10 @@ async function play(flag, id, vipFlags) {
         if (id.indexOf('666_') === 0) {
             parse = 0
             url = id.substring(4)
+            // 替换 _TPL_ 为 480p
+            if (url.indexOf('_TPL_') >= 0) {
+                url = url.replace('_TPL_', '480p')
+            }
         }
 
         return JSON.stringify({
