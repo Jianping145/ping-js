@@ -496,8 +496,8 @@ async function searchContent(wd, quick, pg) {
     return await search(wd, quick)
 }
 
-// ===== T4 标准导出 =====
-export function __jsEvalReturn() {
+// ===== T4 / 蜂蜜影视 / PeekPro 兼容导出 =====
+function __jsEvalReturn() {
     return {
         init: init,
         home: home,
@@ -513,3 +513,17 @@ export function __jsEvalReturn() {
         searchContent: searchContent,
     }
 }
+
+// ES module 导出（PeekPro 等）
+export { __jsEvalReturn }
+
+// 部分蜂蜜影视 / TVBox 需要挂到 global
+try {
+    globalThis.__jsEvalReturn = __jsEvalReturn
+} catch (e) {}
+try {
+    if (typeof global !== 'undefined') global.__jsEvalReturn = __jsEvalReturn
+} catch (e) {}
+try {
+    if (typeof self !== 'undefined') self.__jsEvalReturn = __jsEvalReturn
+} catch (e) {}
