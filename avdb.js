@@ -1,164 +1,348 @@
-const UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_2 like Mac OS X) AppleWebKit/604.1.14 (KHTML, like Gecko)'
+/**
+ * avdb - 蜂蜜影视 CatVod JS Spider
+ * API: https://avdbapi.com/api.php/provide/vod
+ */
+const UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_2 like Mac OS X) AppleWebKit/604.1.14 (KHTML, like Gecko)';
+const API = 'https://avdbapi.com/api.php/provide/vod';
 
-let appConfig = {
-    ver: 20260902,
-    title: 'avdb',
-    site: 'https://avdbapi.com/api.php/provide/vod',
-}
+const HEADERS = {
+  'User-Agent': UA,
+  'Accept': 'application/json, text/plain, */*',
+};
 
-async function getConfig() {
-    let config = appConfig
-    config.tabs = await getTabs()
-    return jsonify(appConfig)
-}
+let siteKey = '';
+let siteType = 0;
 
-async function getTabs() {
-    let tabs = []
-    let url = appConfig.site
-
-    const { data } = await $fetch.get(url, {
-        headers: {
-            'User-Agent': UA,
-        },
-    })
-
-    argsify(data).class.forEach((e) => {
-        tabs.push({
-            id: e.type_id,
-            name: e.type_name,
-            ext: {
-                id: e.type_id,
-            },
-            ui: 1,
-        })
-    })
-
-    return tabs
-}
-
-async function getCards(ext) {
-    ext = argsify(ext)
-    let cards = []
-    let { id, page = 1 } = ext
-
+function httpGet(url, extraHeaders) {
+  let body = '';
+  const headers = Object.assign({}, HEADERS, extraHeaders || {});
+  try {
+    const res = req(url, {
+      method: 'get',
+      headers: headers,
+      timeout: 20000,
+    });
+    if (typeof res === 'string') {
+      body = res;
+    } else if (res) {
+      body = res.content || res.body || res.data || '';
+      if (typeof body !== 'string') body = JSON.stringify(body);
+    }
+  } catch (e1) {
     try {
-        const url = appConfig.site + `?t=${id}&ac=detail&pg=${page}`
+      if (typeof request === 'function') {
+        body = request(url, { headers: headers });
+      }
+    } catch (e2) {}
+  }
+  return body || '';
+}
 
-        const { data } = await $fetch.get(url, {
-            headers: {
-                'User-Agent': UA,
-            },
-        })
+function parseJson(text) {
+  try {
+    if (typeof text === 'object' && text !== null) return text;
+    return JSON.parse(text);
+  } catch (e) {
+    return null;
+  }
+}
 
-        argsify(data).list.forEach((e) => {
-            cards.push({
-                vod_id: `${e.id}`,
-                vod_name: e.name,
-                vod_pic: e.poster_url,
-                vod_remarks: e.tag,
-                vod_pubdate: e.created_at,
-                vod_duration: e.time,
-                ext: {
-                    id: `${e.id}`,
-                },
-            })
-        })
+function mapVod(e) {
+  return {
+    vod_id: String(e.id || e.vod_id || ''),
+    vod_name: e.name || e.vod_name || '',
+    vod_pic: e.poster_url || e.thumb_url || e.vod_pic || '',
+    vod_remarks: e.tag || e.quality || e.type_name || '',
+  };
+}
 
-        return jsonify({
-            list: cards,
-        })
-    } catch (error) {
-        $print(error)
+async function init(cfg) {
+  siteKey = (cfg && cfg.skey) || '';
+  siteType = (cfg && cfg.stype) || 0;
+}
+
+async function home(filter) {
+  try {
+    const raw = httpGet(API);
+    const data = parseJson(raw);
+    const classes = [];
+    if (data && data.class && data.class.length) {
+      for (let i = 0; i < data.class.length; i++) {
+        const c = data.class[i];
+        classes.push({
+          type_id: String(c.type_id),
+          type_name: c.type_name || String(c.type_id),
+        });
+      }
     }
+    if (classes.length === 0) {
+      // 兜底固定分类
+      const fallback = [
+        [1, 'Censored'],
+        [2, 'Uncensored'],
+        [3, 'Uncensored Leaked'],
+        [4, 'Amateur'],
+        [5, 'Chinese AV'],
+        [6, 'Hentai'],
+        [7, 'English subtitle'],
+      ];
+      for (let i = 0; i < fallback.length; i++) {
+        classes.push({ type_id: String(fallback[i][0]), type_name: fallback[i][1] });
+      }
+    }
+    return JSON.stringify({ class: classes, filters: {} });
+  } catch (e) {
+    return JSON.stringify({ class: [], filters: {} });
+  }
 }
 
-async function getTracks(ext) {
-    ext = argsify(ext)
-    let tracks = []
-    let id = ext.id
-    let url = appConfig.site + `?ac=detail&ids=${id}`
-
-    const { data } = await $fetch.get(url, {
-        headers: {
-            'User-Agent': UA,
-        },
-    })
-
-    let vod_play_url = argsify(data).list[0].episodes.server_data.Full.link_embed
-    tracks.push({
-        name: argsify(data).list[0].episodes.server_name,
-        pan: '',
-        ext: {
-            url: vod_play_url,
-        },
-    })
-
-    return jsonify({
-        list: [
-            {
-                title: '默认分组',
-                tracks,
-            },
-        ],
-    })
+async function homeVod() {
+  try {
+    const raw = httpGet(API + '?ac=detail&pg=1');
+    const data = parseJson(raw);
+    const list = [];
+    if (data && data.list) {
+      for (let i = 0; i < data.list.length && i < 24; i++) {
+        list.push(mapVod(data.list[i]));
+      }
+    }
+    return JSON.stringify({ list: list });
+  } catch (e) {
+    return JSON.stringify({ list: [] });
+  }
 }
 
-async function getPlayinfo(ext) {
-    ext = argsify(ext)
-    let url = ext.url
+async function category(tid, pg, filter, extend) {
+  try {
+    const page = parseInt(pg) || 1;
+    const url = API + '?t=' + encodeURIComponent(tid) + '&ac=detail&pg=' + page;
+    const raw = httpGet(url);
+    const data = parseJson(raw);
+    const list = [];
+    if (data && data.list) {
+      for (let i = 0; i < data.list.length; i++) {
+        list.push(mapVod(data.list[i]));
+      }
+    }
+    const pagecount = (data && data.pagecount) ? parseInt(data.pagecount) : (list.length > 0 ? page + 1 : page);
+    const total = (data && data.total) ? parseInt(data.total) : 0;
+    return JSON.stringify({
+      page: page,
+      pagecount: pagecount || 1,
+      limit: 20,
+      total: total || list.length,
+      list: list,
+    });
+  } catch (e) {
+    return JSON.stringify({
+      page: 1,
+      pagecount: 1,
+      limit: 20,
+      total: 0,
+      list: [],
+    });
+  }
+}
 
-    const { data } = await $fetch.get(url, {
-        headers: {
-            'User-Agent': UA,
-            Referer: `https://avdbapi.com/`,
-        },
-    })
+async function detail(id) {
+  try {
+    const vid = String(id);
+    const url = API + '?ac=detail&ids=' + encodeURIComponent(vid);
+    const raw = httpGet(url);
+    const data = parseJson(raw);
+    if (!data || !data.list || !data.list.length) {
+      return JSON.stringify({
+        list: [{
+          vod_id: vid,
+          vod_name: '无数据',
+          vod_pic: '',
+          vod_content: '',
+          vod_play_from: '默认',
+          vod_play_url: '正片$',
+        }],
+      });
+    }
+    const e = data.list[0];
+    let playFrom = 'VIP';
+    let embed = '';
+    try {
+      if (e.episodes) {
+        playFrom = e.episodes.server_name || 'VIP';
+        if (e.episodes.server_data && e.episodes.server_data.Full) {
+          embed = e.episodes.server_data.Full.link_embed || '';
+        }
+        // 兼容多个 server_data key
+        if (!embed && e.episodes.server_data) {
+          const keys = Object.keys(e.episodes.server_data);
+          for (let i = 0; i < keys.length; i++) {
+            const node = e.episodes.server_data[keys[i]];
+            if (node && node.link_embed) {
+              embed = node.link_embed;
+              break;
+            }
+          }
+        }
+      }
+    } catch (err) {}
 
-    // upload18 player embeds the m3u8 URL inside window.PLAYER_CONFIG as
-    // {"theme":...,"m3u8":"https:\/\/helvid.com\/m\/...","alternate720":...}
-    // Note the key is written as "m3u8":"..." (closing quote before the colon).
-    const configMatch = data.match(/"m3u8"\s*:\s*"([^"]+)"/)
-    if (!configMatch) {
-        throw new Error('No m3u8 URL found in page')
+    // 也可能直接是 vod_play_url 风格
+    if (!embed && e.vod_play_url) {
+      return JSON.stringify({
+        list: [{
+          vod_id: vid,
+          vod_name: e.name || e.vod_name || '',
+          vod_pic: e.poster_url || e.vod_pic || '',
+          vod_content: e.description || e.vod_content || '',
+          vod_actor: (e.actor && e.actor.join) ? e.actor.join(',') : (e.vod_actor || ''),
+          vod_remarks: e.tag || '',
+          vod_play_from: e.vod_play_from || playFrom,
+          vod_play_url: e.vod_play_url,
+        }],
+      });
     }
 
-    // The JSON value is HTML-escaped: \/ for / and \uXXXX for & etc.
-    let m3u8Path = configMatch[1]
-        .replace(/\\\//g, '/')
-        .replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
-
-    return jsonify({ urls: [m3u8Path], headers: [{ 'User-Agent': UA, Referer: `${url}/` }] })
+    return JSON.stringify({
+      list: [{
+        vod_id: vid,
+        vod_name: e.name || e.vod_name || '',
+        vod_pic: e.poster_url || e.thumb_url || '',
+        vod_content: e.description || '',
+        vod_actor: (e.actor && e.actor.join) ? e.actor.join(',') : '',
+        vod_year: e.year || '',
+        vod_remarks: e.tag || e.time || '',
+        vod_play_from: playFrom,
+        vod_play_url: '正片$' + (embed || ''),
+      }],
+    });
+  } catch (e) {
+    return JSON.stringify({
+      list: [{
+        vod_id: id,
+        vod_name: '详情失败',
+        vod_pic: '',
+        vod_content: String(e),
+        vod_play_from: '默认',
+        vod_play_url: '正片$',
+      }],
+    });
+  }
 }
 
-async function search(ext) {
-    ext = argsify(ext)
-    let cards = []
-
-    const text = encodeURIComponent(ext.text)
-    const page = ext.page || 1
-    const url = `${appConfig.site}?ac=detail&wd=${text}&pg=${page}`
-
-    const { data } = await $fetch.get(url, {
-        headers: {
-            'User-Agent': UA,
+async function play(flag, id, flags) {
+  try {
+    let playUrl = id || '';
+    // 已是 m3u8 / mp4
+    if (/\.m3u8|\.mp4/i.test(playUrl)) {
+      return JSON.stringify({
+        parse: 0,
+        jx: 0,
+        url: playUrl,
+        header: {
+          'User-Agent': UA,
+          'Referer': 'https://avdbapi.com/',
         },
-    })
+      });
+    }
 
-    argsify(data).list.forEach((e) => {
-        cards.push({
-            vod_id: `${e.id}`,
-            vod_name: e.name,
-            vod_pic: e.poster_url,
-            vod_remarks: e.tag,
-            vod_pubdate: e.created_at,
-            vod_duration: e.time,
-            ext: {
-                id: `${e.id}`,
-            },
-        })
-    })
+    // embed 页提取 m3u8（upload18 PLAYER_CONFIG）
+    if (playUrl.indexOf('http') === 0) {
+      const html = httpGet(playUrl, {
+        'User-Agent': UA,
+        'Referer': 'https://avdbapi.com/',
+      });
+      let m = html.match(/"m3u8"\s*:\s*"([^"]+)"/);
+      if (m && m[1]) {
+        let m3u8 = m[1]
+          .replace(/\\\//g, '/')
+          .replace(/\\u([0-9a-fA-F]{4})/g, function (_, h) {
+            return String.fromCharCode(parseInt(h, 16));
+          });
+        return JSON.stringify({
+          parse: 0,
+          jx: 0,
+          url: m3u8,
+          header: {
+            'User-Agent': UA,
+            'Referer': playUrl,
+          },
+        });
+      }
+      // 其它页面里的 m3u8
+      m = html.match(/https?:\\\/\\\/[^"']+\.m3u8[^"']*/);
+      if (m) {
+        const u = m[0].replace(/\\\//g, '/');
+        return JSON.stringify({
+          parse: 0,
+          jx: 0,
+          url: u,
+          header: { 'User-Agent': UA, 'Referer': playUrl },
+        });
+      }
+      m = html.match(/https?:\/\/[^"'\s<>]+?\.m3u8[^"'\s<>]*/i);
+      if (m) {
+        return JSON.stringify({
+          parse: 0,
+          jx: 0,
+          url: m[0],
+          header: { 'User-Agent': UA, 'Referer': playUrl },
+        });
+      }
+      // 嗅探
+      return JSON.stringify({
+        parse: 1,
+        jx: 0,
+        url: playUrl,
+        header: { 'User-Agent': UA, 'Referer': 'https://avdbapi.com/' },
+      });
+    }
 
-    return jsonify({
-        list: cards,
-    })
+    return JSON.stringify({
+      parse: 0,
+      jx: 0,
+      url: playUrl,
+      header: { 'User-Agent': UA },
+    });
+  } catch (e) {
+    return JSON.stringify({
+      parse: 0,
+      jx: 0,
+      url: id,
+      header: { 'User-Agent': UA },
+    });
+  }
+}
+
+async function search(wd, quick, pg) {
+  try {
+    const page = parseInt(pg) || 1;
+    const url = API + '?ac=detail&wd=' + encodeURIComponent(wd || '') + '&pg=' + page;
+    const raw = httpGet(url);
+    const data = parseJson(raw);
+    const list = [];
+    if (data && data.list) {
+      for (let i = 0; i < data.list.length; i++) {
+        list.push(mapVod(data.list[i]));
+      }
+    }
+    const pagecount = (data && data.pagecount) ? parseInt(data.pagecount) : 1;
+    return JSON.stringify({
+      page: page,
+      pagecount: pagecount || 1,
+      list: list,
+    });
+  } catch (e) {
+    return JSON.stringify({ list: [] });
+  }
+}
+
+export function __jsEvalReturn() {
+  return {
+    init: init,
+    home: home,
+    homeVod: homeVod,
+    category: category,
+    detail: detail,
+    play: play,
+    search: search,
+  };
 }
