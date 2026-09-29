@@ -1,42 +1,63 @@
 /**
- * 有爱爱 - 蜂蜜影视 CatVod JS Spider
- * https://www.uaa.com
+ * 有爱爱 - 蜂蜜影视 CatVod JS Spider（经 Cloudflare Worker 代理）
+ *
+ * 使用前：把 PROXY 改成你部署的 Worker 地址，例如：
+ *   const PROXY = 'https://uaa-proxy.你的子域.workers.dev';
+ *
+ * 接口配置示例：
+ * {
+ *   "key": "uaa",
+ *   "name": "有爱爱",
+ *   "type": 3,
+ *   "api": "https://xxx/有爱爱.js",
+ *   "ext": "https://uaa-proxy.xxx.workers.dev"
+ * }
  */
 const UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1';
 const HOST = 'https://www.uaa.com';
 
-const HEADERS = {
+// 默认代理（部署后务必改成你自己的；也可通过 ext 传入）
+let PROXY = '';
+
+const BASE_HEADERS = {
     'User-Agent': UA,
-    'Referer': HOST + '/',
-    'Origin': HOST,
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-    'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Cache-Control': 'no-cache',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
 };
 
 let siteKey = '';
 let siteType = 0;
 
+function joinProxy(targetUrl) {
+    if (!PROXY) return targetUrl;
+    const base = PROXY.replace(/\/$/, '');
+    // 优先 query 模式，兼容性最好
+    return base + '/?url=' + encodeURIComponent(targetUrl);
+}
+
 function httpGet(url) {
+    const real = joinProxy(url);
     let html = '';
+    const headers = Object.assign({}, BASE_HEADERS, {
+        'Referer': HOST + '/',
+        'Origin': HOST,
+    });
     try {
-        // 方式1: req 返回对象
-        let res = req(url, {
+        let res = req(real, {
             method: 'get',
-            headers: HEADERS,
-            timeout: 20000,
+            headers: headers,
+            timeout: 25000,
         });
         if (typeof res === 'string') {
             html = res;
         } else if (res) {
             html = res.content || res.body || res.data || '';
-            if (typeof html !== 'string') html = JSON.stringify(html);
+            if (typeof html !== 'string') html = String(html);
         }
     } catch (e1) {
         try {
-            // 方式2: 全局 request
             if (typeof request === 'function') {
-                html = request(url, { headers: HEADERS });
+                html = request(real, { headers: headers });
             }
         } catch (e2) {}
     }
@@ -45,7 +66,7 @@ function httpGet(url) {
 
 function isChallenge(html) {
     if (!html || html.length < 80) return true;
-    return /challenge-platform|Just a moment|cf-mitigated|cf-browser-verification|Checking your browser|Enable JavaScript and cookies/i.test(html);
+    return /challenge-platform|Just a moment|cf-mitigated|cf-browser-verification|Checking your browser|Enable JavaScript and cookies|Verify you are human|Perform.*security verification/i.test(html);
 }
 
 function parseWithCheerio(html) {
@@ -91,7 +112,6 @@ function parseWithRegex(html) {
             || block.match(/<a[^>]*title="([^"]+)"/i);
         const coverM = block.match(/(?:data-cfsrc|data-src|src)="([^"]+)"/i);
         const dateM = block.match(/<span[^>]*>([\s\S]*?)<\/span>/i);
-
         let href = hrefM ? hrefM[1].trim() : '';
         let title = titleM ? titleM[1].replace(/<[^>]+>/g, '').trim() : '';
         let cover = coverM ? coverM[1].trim() : '';
@@ -149,6 +169,15 @@ function buildCateUrl(tid, pg) {
 async function init(cfg) {
     siteKey = (cfg && cfg.skey) || '';
     siteType = (cfg && cfg.stype) || 0;
+    // ext 可传 Worker 地址
+    try {
+        const ext = (cfg && (cfg.ext || cfg.extend)) || '';
+        if (typeof ext === 'string' && /^https?:\/\//i.test(ext)) {
+            PROXY = ext.replace(/\/$/, '');
+        } else if (ext && typeof ext === 'object' && ext.proxy) {
+            PROXY = String(ext.proxy).replace(/\/$/, '');
+        }
+    } catch (e) {}
 }
 
 async function home(filter) {
@@ -165,46 +194,54 @@ async function home(filter) {
 
 async function homeVod() {
     try {
+        if (!PROXY) {
+            return JSON.stringify({ list: [tipItem('未配置Worker代理：请在ext填入Worker地址')] });
+        }
         const html = httpGet(HOST + '/chinese-av-porn');
         if (isChallenge(html)) {
-            return JSON.stringify({ list: [tipItem('站点Cloudflare拦截，请换节点/代理')] });
+            return JSON.stringify({ list: [tipItem('代理后仍被CF拦截，需换节点或带Cookie')] });
         }
         const list = parseList(html);
+        if (list.length === 0) {
+            return JSON.stringify({ list: [tipItem('代理通了但解析0条，检查Worker返回')] });
+        }
         return JSON.stringify({ list: list.slice(0, 24) });
     } catch (e) {
-        return JSON.stringify({ list: [tipItem('首页请求失败: ' + String(e).slice(0, 80))] });
+        return JSON.stringify({ list: [tipItem('首页失败: ' + String(e).slice(0, 80))] });
     }
 }
 
 async function category(tid, pg, filter, extend) {
     try {
+        if (!PROXY) {
+            return JSON.stringify({
+                page: 1, pagecount: 1, limit: 20, total: 0,
+                list: [tipItem('未配置Worker：ext填 https://你的.workers.dev')],
+            });
+        }
         const page = parseInt(pg) || 1;
         const url = buildCateUrl(tid, page);
         const html = httpGet(url);
-
         if (!html || html.length < 50) {
             return JSON.stringify({
                 page, pagecount: 1, limit: 20, total: 0,
-                list: [tipItem('请求返回空，检查网络/代理')],
+                list: [tipItem('代理返回空，检查Worker是否部署成功')],
             });
         }
         if (isChallenge(html)) {
             return JSON.stringify({
                 page, pagecount: 1, limit: 20, total: 0,
-                list: [tipItem('Cloudflare人机验证，请换VPN节点后重试')],
+                list: [tipItem('Worker出口仍触发CF，尝试绑定自定义域名或加Cookie')],
             });
         }
-
         const list = parseList(html);
         if (list.length === 0) {
-            // 返回片段便于判断页面结构
-            const snippet = html.replace(/\s+/g, ' ').slice(0, 120);
+            const snip = html.replace(/\s+/g, ' ').slice(0, 100);
             return JSON.stringify({
                 page, pagecount: 1, limit: 20, total: 0,
-                list: [tipItem('解析到0条 | ' + snippet)],
+                list: [tipItem('解析0条 | ' + snip)],
             });
         }
-
         return JSON.stringify({
             page,
             pagecount: list.length >= 10 ? page + 1 : page,
@@ -215,7 +252,7 @@ async function category(tid, pg, filter, extend) {
     } catch (e) {
         return JSON.stringify({
             page: 1, pagecount: 1, limit: 20, total: 0,
-            list: [tipItem('分类异常: ' + String(e).slice(0, 100))],
+            list: [tipItem('分类异常: ' + String(e).slice(0, 80))],
         });
     }
 }
@@ -228,7 +265,7 @@ async function detail(id) {
             return JSON.stringify({
                 list: [{
                     vod_id: url,
-                    vod_name: 'Cloudflare拦截，无法获取播放地址',
+                    vod_name: '详情被CF拦截',
                     vod_pic: '',
                     vod_content: '',
                     vod_play_from: '默认分组',
@@ -236,7 +273,6 @@ async function detail(id) {
                 }],
             });
         }
-
         let playUrl = '';
         let m = html.match(/id=["']mui-player["'][^>]*src=["']([^"']+)["']/i)
             || html.match(/src=["']([^"']+)["'][^>]*id=["']mui-player["']/i);
@@ -249,14 +285,12 @@ async function detail(id) {
             m = html.match(/https?:\/\/[^"'\s<>]+?\.mp4[^"'\s<>]*/i);
             if (m) playUrl = m[0];
         }
-        // 尝试 cheerio
         if (!playUrl && typeof load === 'function') {
             try {
                 const $ = load(html);
                 playUrl = $('#mui-player').attr('src') || $('video').attr('src') || $('source').attr('src') || '';
             } catch (e) {}
         }
-
         let title = '';
         m = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
         if (m) title = m[1].replace(/<[^>]+>/g, '').trim();
@@ -264,10 +298,8 @@ async function detail(id) {
             m = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
             if (m) title = m[1].replace(/<[^>]+>/g, '').trim().replace(/\s*[-|·].*$/, '');
         }
-
         let pic = '';
-        m = html.match(/property=["']og:image["'][^>]*content=["']([^"']+)["']/i)
-            || html.match(/content=["']([^"']+)["'][^>]*property=["']og:image["']/i);
+        m = html.match(/property=["']og:image["'][^>]*content=["']([^"']+)["']/i);
         if (m) pic = m[1];
 
         return JSON.stringify({
@@ -295,6 +327,7 @@ async function detail(id) {
 }
 
 async function play(flag, id, flags) {
+    // 播放地址一般是 CDN，通常不必走 Worker；若也被拦可再改
     return JSON.stringify({
         parse: 0,
         jx: 0,
@@ -309,6 +342,9 @@ async function play(flag, id, flags) {
 
 async function search(wd, quick, pg) {
     try {
+        if (!PROXY) {
+            return JSON.stringify({ list: [tipItem('未配置Worker代理')] });
+        }
         const page = parseInt(pg) || 1;
         let url = HOST + '/video/list?searchType=1&keyword=' + encodeURIComponent(wd);
         if (page > 1) {
@@ -316,7 +352,7 @@ async function search(wd, quick, pg) {
         }
         const html = httpGet(url);
         if (isChallenge(html)) {
-            return JSON.stringify({ list: [tipItem('搜索被CF拦截，换节点')] });
+            return JSON.stringify({ list: [tipItem('搜索仍被CF拦截')] });
         }
         const list = parseList(html);
         return JSON.stringify({
