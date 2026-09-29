@@ -1,181 +1,121 @@
-//来着群友’夢‘
-const cheerio = createCheerio()
-
-const UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1'
-
-let appConfig = {
-    ver: 1,
+var rule = {
     title: '有爱爱',
-    site: 'https://www.uaa.com',
-    tabs: [
-        {
-            name: '国产视频',
-            ui: 1,
-            ext: {
-                tip: 'chinese-av-porn',
-                origin: 1,
-            },
-        },
-        {
-            name: '日本AV',
-            ui: 1,
-            ext: {
-                tip: 'jav',
-                origin: 1,
-            },
-        },
-        {
-            name: '无码流出',
-            ui: 1,
-            ext: {
-                category: '无码流出',
-                origin: 2,
-            },
-        },
-        {
-            name: 'H动漫',
-            ui: 1,
-            ext: {
-                origin: 3,
-            },
-        },
-    ],
-}
+    host: 'https://www.uaa.com',
+    // fyclass 为分类标识，fypage 为页码
+    url: '/fyclass',
+    searchUrl: '/video/list?searchType=1&keyword=**&page=fypage',
+    searchable: 2,
+    quickSearch: 0,
+    filterable: 0,
+    headers: {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1',
+    },
+    timeout: 15000,
+    class_name: '国产视频&日本AV&无码流出&H动漫',
+    class_url: 'chinese-av-porn|1&jav|1&无码流出|2&3',
+    play_parse: true,
+    lazy: $js.toString(() => {
+        input = {
+            parse: 0,
+            jx: 0,
+            url: input,
+            header: rule.headers
+        };
+        input.header['Referer'] = 'https://www.uaa.com/';
+        input.header['Origin'] = 'https://www.uaa.com';
+    }),
+    // 分类页链接动态拼接（对齐原 getCards 逻辑）
+    一级: $js.toString(() => {
+        let d = [];
+        let html = '';
+        // MYTYPE 形如 chinese-av-porn|1  或  无码流出|2  或  3
+        let parts = MYTYPE.split('|');
+        let page = MYPAGE || 1;
+        let url = HOST;
 
-async function getConfig() {
-    return jsonify(appConfig)
-}
-
-async function getCards(ext) {
-    ext = argsify(ext)
-    let cards = []
-    let { tip, category, origin, page = 1 } = ext
-    
-    let url = appConfig.site
-    
-    if (tip) {
-        url += `/${tip}`
-        if (page > 1) {
-            url += `?origin=${origin}$sort=1&page=${page}`
+        if (parts.length === 2 && !/^\d+$/.test(parts[0])) {
+            // tip 模式：/chinese-av-porn  或  /jav
+            let tip = parts[0];
+            let origin = parts[1];
+            url += '/' + tip;
+            if (page > 1) {
+                url += '?origin=' + origin + '&sort=1&page=' + page;
+            }
+        } else if (parts.length === 2) {
+            // category + origin：无码流出
+            let category = parts[0];
+            let origin = parts[1];
+            url += '/video/list?category=' + encodeURIComponent(category) + '&origin=' + origin;
+            if (page > 1) {
+                url += '&sort=1&page=' + page;
+            }
+        } else {
+            // 仅 origin：H动漫 origin=3
+            let origin = parts[0];
+            url += '/video/list?origin=' + origin;
+            if (page > 1) {
+                url += '&sort=1&page=' + page;
+            }
         }
-    } else {
-        url += `/video/list?`
-        if (category && origin) url += `category=${category}&origin=${origin}`
-        if (origin  && !category) url += `origin=${origin}`
+
+        html = request(url);
+        let list = pdfa(html, 'li.video_li');
+        list.forEach(it => {
+            let href = pdfh(it, '.title a&&href');
+            let title = pdfh(it, '.title a&&Text');
+            let cover = pdfh(it, '.cover&&src') || pdfh(it, '.cover&&data-cfsrc');
+            let pubdate = pdfh(it, 'span&&Text');
+            if (href && !href.startsWith('http')) {
+                href = HOST + href;
+            }
+            d.push({
+                title: title,
+                img: cover,
+                desc: pubdate,
+                url: href
+            });
+        });
+        setResult(d);
+    }),
+    二级: $js.toString(() => {
+        let html = request(input);
+        let playUrl = pdfh(html, '#mui-player&&src') || '';
+        let title = pdfh(html, 'h1&&Text') || pdfh(html, 'title&&Text') || '有爱爱';
+        let pic = pdfh(html, '.cover&&src') || pdfh(html, 'img&&src') || '';
+        VOD = {
+            vod_id: input,
+            vod_name: title,
+            vod_pic: pic,
+            vod_content: '',
+            vod_play_from: '默认分组',
+            vod_play_url: '播放$' + playUrl
+        };
+    }),
+    搜索: $js.toString(() => {
+        let d = [];
+        let page = MYPAGE || 1;
+        let key = KEY;
+        let url = HOST + '/video/list?searchType=1&keyword=' + encodeURIComponent(key);
         if (page > 1) {
-            url += `&$sort=1&page=${page}`
+            url = HOST + '/video/list?keyword=' + encodeURIComponent(key) + '&category=&origin=&tag=&sort=0&page=' + page;
         }
-    }
-    
-    const { data } = await $fetch.get(url, {
-        headers:  {
-            'User-Agent': UA,
-            },
-    })
-
-    const $ = cheerio.load(data)
-
-    $('li.video_li').each((_, element) => {
-        const href = $(element).find('.title a').attr('href')
-        const title = $(element).find('.title a').text()
-        const cover = $(element).find('.cover').attr('src') || $(element).find('.cover').attr('data-cfsrc')
-        const pubdate = $(element).find('span').first().text()
-        cards.push({
-            vod_id: href,
-            vod_name: title,
-            vod_pic: cover,
-            vod_pubdate: pubdate,
-            ext: {
-                url: `${appConfig.site}${href}`,
-            },
-        })
-    })
-
-    return jsonify({
-        list: cards,
-    })
-}
-
-async function getTracks(ext) {
-    ext = argsify(ext)
-    let tracks = []
-    let url = ext.url
-
-     const { data } = await $fetch.get(url, {
-        headers: {
-             'User-Agent': UA,
-            },
-    })
-
-        const $ = cheerio.load(data)
-        const videourl = $('#mui-player').attr('src')
-            tracks.push({
-            name: '播放',
-            ext: {
-                url: videourl,
-            },
-        })
-        
-    return jsonify({
-        list: [
-        {
-            title: '默认分组',
-            tracks,
-        },
-    ],
-    })
-}
-
-async function getPlayinfo(ext) {
-    ext = argsify(ext)
-    const playUrl = ext.url
-    
-    return jsonify({
-        urls: [playUrl],
-        headers: [{
-            'User-Agent': UA,
-            'Referer': 'https://www.uaa.com/',
-            'Origin': 'https://www.uaa.com'
-        }]
-    })
-}
-
-async function search(ext) {
-    ext = argsify(ext)
-    let cards = []
-    let text = encodeURIComponent(ext.text)
-    let page = ext.page || 1
-    let url = `${appConfig.site}/video/list?searchType=1&keyword=${text}`
-    
-    if(page >1){
-        url = `https://www.uaa.com/video/list?keyword=${text}&category=&origin=&tag=&sort=0&page=${page}`
-    }
-
-    const { data } = await $fetch.get(url, {
-        headers:  {
-            'User-Agent': UA,
-            },
-    })
-
-    const $ = cheerio.load(data)
-
-    $('li.video_li').each((_, element) => {
-        const href = $(element).find('.title a').attr('href')
-        const title = $(element).find('.title a').text()
-        const cover = $(element).find('.cover').attr('src') || $(element).find('.cover').attr('data-cfsrc')
-        const pubdate = $(element).find('span').first().text()
-        cards.push({
-            vod_id: href,
-            vod_name: title,
-            vod_pic: cover,
-            vod_pubdate: pubdate,
-            ext: {
-                url: `${appConfig.site}${href}`,
-            },
-        })
-    })
-
-    return jsonify({
-        list: cards,
-    })
-}
+        let html = request(url);
+        let list = pdfa(html, 'li.video_li');
+        list.forEach(it => {
+            let href = pdfh(it, '.title a&&href');
+            let title = pdfh(it, '.title a&&Text');
+            let cover = pdfh(it, '.cover&&src') || pdfh(it, '.cover&&data-cfsrc');
+            let pubdate = pdfh(it, 'span&&Text');
+            if (href && !href.startsWith('http')) {
+                href = HOST + href;
+            }
+            d.push({
+                title: title,
+                img: cover,
+                desc: pubdate,
+                url: href
+            });
+        });
+        setResult(d);
+    }),
+};
