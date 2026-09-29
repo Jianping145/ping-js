@@ -1,121 +1,159 @@
 var rule = {
     title: '有爱爱',
     host: 'https://www.uaa.com',
-    // fyclass 为分类标识，fypage 为页码
-    url: '/fyclass',
+    url: '/fyclass-fypage',
     searchUrl: '/video/list?searchType=1&keyword=**&page=fypage',
     searchable: 2,
     quickSearch: 0,
     filterable: 0,
     headers: {
         'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1',
+        'Referer': 'https://www.uaa.com/',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
     },
     timeout: 15000,
     class_name: '国产视频&日本AV&无码流出&H动漫',
-    class_url: 'chinese-av-porn|1&jav|1&无码流出|2&3',
+    class_url: 'chinese-av-porn&jav&wuma&hdongman',
     play_parse: true,
     lazy: $js.toString(() => {
         input = {
             parse: 0,
             jx: 0,
             url: input,
-            header: rule.headers
+            header: {
+                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1',
+                'Referer': 'https://www.uaa.com/',
+                'Origin': 'https://www.uaa.com'
+            }
         };
-        input.header['Referer'] = 'https://www.uaa.com/';
-        input.header['Origin'] = 'https://www.uaa.com';
     }),
-    // 分类页链接动态拼接（对齐原 getCards 逻辑）
     一级: $js.toString(() => {
         let d = [];
-        let html = '';
-        // MYTYPE 形如 chinese-av-porn|1  或  无码流出|2  或  3
-        let parts = MYTYPE.split('|');
-        let page = MYPAGE || 1;
-        let url = HOST;
+        try {
+            // input 形如 https://www.uaa.com/chinese-av-porn-1
+            let path = (input || '').replace(HOST, '').replace(/^\//, '');
+            let m = path.match(/^([a-zA-Z0-9\u4e00-\u9fa5]+)-(\d+)$/);
+            let cate = m ? m[1] : 'chinese-av-porn';
+            let page = m ? parseInt(m[2]) : 1;
+            if (isNaN(page) || page < 1) page = 1;
 
-        if (parts.length === 2 && !/^\d+$/.test(parts[0])) {
-            // tip 模式：/chinese-av-porn  或  /jav
-            let tip = parts[0];
-            let origin = parts[1];
-            url += '/' + tip;
-            if (page > 1) {
-                url += '?origin=' + origin + '&sort=1&page=' + page;
+            let url = HOST;
+            if (cate === 'chinese-av-porn' || cate === 'jav') {
+                url += '/' + cate;
+                if (page > 1) url += '?origin=1&sort=1&page=' + page;
+            } else if (cate === 'wuma') {
+                url += '/video/list?category=' + encodeURIComponent('无码流出') + '&origin=2';
+                if (page > 1) url += '&sort=1&page=' + page;
+            } else if (cate === 'hdongman') {
+                url += '/video/list?origin=3';
+                if (page > 1) url += '&sort=1&page=' + page;
+            } else {
+                url += '/' + cate;
+                if (page > 1) url += '?sort=1&page=' + page;
             }
-        } else if (parts.length === 2) {
-            // category + origin：无码流出
-            let category = parts[0];
-            let origin = parts[1];
-            url += '/video/list?category=' + encodeURIComponent(category) + '&origin=' + origin;
-            if (page > 1) {
-                url += '&sort=1&page=' + page;
-            }
-        } else {
-            // 仅 origin：H动漫 origin=3
-            let origin = parts[0];
-            url += '/video/list?origin=' + origin;
-            if (page > 1) {
-                url += '&sort=1&page=' + page;
-            }
-        }
 
-        html = request(url);
-        let list = pdfa(html, 'li.video_li');
-        list.forEach(it => {
-            let href = pdfh(it, '.title a&&href');
-            let title = pdfh(it, '.title a&&Text');
-            let cover = pdfh(it, '.cover&&src') || pdfh(it, '.cover&&data-cfsrc');
-            let pubdate = pdfh(it, 'span&&Text');
-            if (href && !href.startsWith('http')) {
-                href = HOST + href;
+            let html = request(url);
+            if (!html || html.length < 100) {
+                setResult([]);
+                return;
             }
-            d.push({
-                title: title,
-                img: cover,
-                desc: pubdate,
-                url: href
+            // Cloudflare 挑战页直接返回空
+            if (html.indexOf('cf-mitigated') > -1 || html.indexOf('Just a moment') > -1 || html.indexOf('challenge-platform') > -1) {
+                setResult([]);
+                return;
+            }
+
+            let list = pdfa(html, 'li.video_li');
+            if (!list || list.length === 0) {
+                // 兼容其它可能的列表结构
+                list = pdfa(html, '.video_li') || [];
+            }
+            list.forEach(it => {
+                let href = pdfh(it, '.title a&&href') || pdfh(it, 'a&&href');
+                let title = pdfh(it, '.title a&&Text') || pdfh(it, 'a&&Text');
+                let cover = pdfh(it, '.cover&&src') || pdfh(it, '.cover&&data-cfsrc') || pdfh(it, 'img&&src') || pdfh(it, 'img&&data-src');
+                let pubdate = pdfh(it, 'span&&Text') || '';
+                if (!href) return;
+                if (href.indexOf('http') !== 0) href = HOST + href;
+                d.push({
+                    title: (title || '').trim(),
+                    img: cover || '',
+                    desc: (pubdate || '').trim(),
+                    url: href
+                });
             });
-        });
+        } catch (e) {
+            // 避免整个 categoryContent 变成 {error: ...}
+        }
         setResult(d);
     }),
     二级: $js.toString(() => {
-        let html = request(input);
-        let playUrl = pdfh(html, '#mui-player&&src') || '';
-        let title = pdfh(html, 'h1&&Text') || pdfh(html, 'title&&Text') || '有爱爱';
-        let pic = pdfh(html, '.cover&&src') || pdfh(html, 'img&&src') || '';
-        VOD = {
-            vod_id: input,
-            vod_name: title,
-            vod_pic: pic,
-            vod_content: '',
-            vod_play_from: '默认分组',
-            vod_play_url: '播放$' + playUrl
-        };
+        try {
+            let html = request(input);
+            let playUrl = pdfh(html, '#mui-player&&src') || pdfh(html, 'video&&src') || pdfh(html, 'source&&src') || '';
+            // 尝试从页面脚本里抠 m3u8 / mp4
+            if (!playUrl) {
+                let m = html.match(/https?:\/\/[^"'\s]+\.m3u8[^"'\s]*/);
+                if (m) playUrl = m[0];
+            }
+            if (!playUrl) {
+                let m2 = html.match(/https?:\/\/[^"'\s]+\.mp4[^"'\s]*/);
+                if (m2) playUrl = m2[0];
+            }
+            let title = pdfh(html, 'h1&&Text') || pdfh(html, '.title&&Text') || pdfh(html, 'title&&Text') || '有爱爱';
+            let pic = pdfh(html, '.cover&&src') || pdfh(html, 'img&&src') || '';
+            VOD = {
+                vod_id: input,
+                vod_name: (title || '').trim().replace(/\s*-\s*有爱爱.*$/, ''),
+                vod_pic: pic,
+                vod_content: '',
+                vod_play_from: '默认分组',
+                vod_play_url: '播放$' + playUrl
+            };
+        } catch (e) {
+            VOD = {
+                vod_id: input,
+                vod_name: '解析失败',
+                vod_pic: '',
+                vod_content: String(e),
+                vod_play_from: '默认分组',
+                vod_play_url: '播放$'
+            };
+        }
     }),
     搜索: $js.toString(() => {
         let d = [];
-        let page = MYPAGE || 1;
-        let key = KEY;
-        let url = HOST + '/video/list?searchType=1&keyword=' + encodeURIComponent(key);
-        if (page > 1) {
-            url = HOST + '/video/list?keyword=' + encodeURIComponent(key) + '&category=&origin=&tag=&sort=0&page=' + page;
-        }
-        let html = request(url);
-        let list = pdfa(html, 'li.video_li');
-        list.forEach(it => {
-            let href = pdfh(it, '.title a&&href');
-            let title = pdfh(it, '.title a&&Text');
-            let cover = pdfh(it, '.cover&&src') || pdfh(it, '.cover&&data-cfsrc');
-            let pubdate = pdfh(it, 'span&&Text');
-            if (href && !href.startsWith('http')) {
-                href = HOST + href;
+        try {
+            let page = 1;
+            try { page = parseInt(MYPG || MYPAGE || 1); } catch (e) {}
+            if (isNaN(page) || page < 1) page = 1;
+            let key = KEY || '';
+            let url = HOST + '/video/list?searchType=1&keyword=' + encodeURIComponent(key);
+            if (page > 1) {
+                url = HOST + '/video/list?keyword=' + encodeURIComponent(key) + '&category=&origin=&tag=&sort=0&page=' + page;
             }
-            d.push({
-                title: title,
-                img: cover,
-                desc: pubdate,
-                url: href
+            let html = request(url);
+            if (!html || html.indexOf('challenge-platform') > -1) {
+                setResult([]);
+                return;
+            }
+            let list = pdfa(html, 'li.video_li') || [];
+            list.forEach(it => {
+                let href = pdfh(it, '.title a&&href') || pdfh(it, 'a&&href');
+                let title = pdfh(it, '.title a&&Text') || pdfh(it, 'a&&Text');
+                let cover = pdfh(it, '.cover&&src') || pdfh(it, '.cover&&data-cfsrc') || pdfh(it, 'img&&src');
+                let pubdate = pdfh(it, 'span&&Text') || '';
+                if (!href) return;
+                if (href.indexOf('http') !== 0) href = HOST + href;
+                d.push({
+                    title: (title || '').trim(),
+                    img: cover || '',
+                    desc: (pubdate || '').trim(),
+                    url: href
+                });
             });
-        });
+        } catch (e) {}
         setResult(d);
     }),
 };
