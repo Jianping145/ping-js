@@ -1,12 +1,17 @@
 /**
  * 桃花族 / 黄色仓库 - 蜂蜜影视 CatVod JS Spider
  * 播放: POST /static/count.php → base64(m3u8)
+ * 注意: 部分镜像列表可用但播放页会跳首页，需自动换域
  */
 const UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1';
+const HOSTS = [
+  'https://444.0ock.cc',
+  'https://333.agsck.cc',
+  'https://222.agsck.cc',
+];
 const PORTALS = ['http://hscangku.com', 'http://920ck.us', 'http://7340hsck.cc'];
-const FALLBACK_HOSTS = ['https://222.agsck.cc', 'https://444.0ock.cc'];
 
-let HOST = '';
+let HOST = HOSTS[0];
 let siteKey = '';
 let siteType = 0;
 
@@ -15,8 +20,8 @@ function headers(extra) {
     'User-Agent': UA,
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+    'Referer': (HOST || HOSTS[0]) + '/',
   };
-  if (HOST) h['Referer'] = HOST + '/';
   if (extra) for (const k in extra) h[k] = extra[k];
   return h;
 }
@@ -45,19 +50,13 @@ function httpPost(url, formBody, extra) {
     'X-Requested-With': 'XMLHttpRequest',
     'Accept': 'application/json, text/javascript, */*; q=0.01',
   }, extra || {}));
-
-  // 多种 POST 写法兼容不同壳
   const attempts = [
     () => req(url, { method: 'post', headers: h, body: formBody, data: formBody, postType: 'form', timeout: 20000 }),
     () => req(url, { method: 'POST', headers: h, data: formBody, timeout: 20000 }),
-    () => req(url, { headers: h, body: formBody, method: 'post', timeout: 20000 }),
+    () => req(url, { method: 'post', headers: h, body: formBody, timeout: 20000 }),
   ];
-  if (typeof post === 'function') {
-    attempts.push(() => post(url, formBody, { headers: h }));
-  }
-  if (typeof request === 'function') {
-    attempts.push(() => request(url, { method: 'POST', headers: h, body: formBody, data: formBody }));
-  }
+  if (typeof post === 'function') attempts.push(() => post(url, formBody, { headers: h }));
+  if (typeof request === 'function') attempts.push(() => request(url, { method: 'POST', headers: h, body: formBody, data: formBody }));
 
   for (let i = 0; i < attempts.length; i++) {
     try {
@@ -71,12 +70,18 @@ function httpPost(url, formBody, extra) {
   return html || '';
 }
 
-function absUrl(u) {
+function absUrl(u, host) {
   if (!u) return '';
   if (u.indexOf('http') === 0) return u;
   if (u.indexOf('//') === 0) return 'https:' + u;
-  const base = HOST || FALLBACK_HOSTS[0];
+  const base = host || HOST || HOSTS[0];
   return base + (u.charAt(0) === '/' ? u : '/' + u);
+}
+
+/** 把任意镜像上的 /v5/xx 路径统一到当前 HOST */
+function rewriteHost(url) {
+  if (!url) return url;
+  return url.replace(/^https?:\/\/[^/]+/i, HOST);
 }
 
 function isChallenge(html) {
@@ -84,48 +89,73 @@ function isChallenge(html) {
   return /Just a moment|cf-mitigated|challenge-platform/i.test(html);
 }
 
-function probeHost(c) {
+/** 播放页特征：含 AID/read_zone */
+function isPlayHtml(html) {
+  return !!(html && (html.indexOf('AID=') >= 0 || html.indexOf('read_zone') >= 0 || html.indexOf('mountPlayer') >= 0));
+}
+
+function probeList(host) {
   try {
-    const test = httpGet(c + '/');
-    if (test && (test.indexOf('stui-') >= 0 || test.indexOf('vodtype') >= 0 || test.indexOf('/v5/') >= 0)) {
-      return true;
-    }
-  } catch (e) {}
-  return false;
+    const html = httpGet(host + '/vodtype/8-1.html');
+    return html && html.length > 5000 && (html.indexOf('/v5/') >= 0 || html.indexOf('stui-vodlist') >= 0);
+  } catch (e) {
+    return false;
+  }
+}
+
+function probePlay(host) {
+  try {
+    // 用列表里随便抽一个 id 测太重，直接看首页是否可进
+    const html = httpGet(host + '/');
+    return html && html.length > 3000;
+  } catch (e) {
+    return false;
+  }
 }
 
 function resolveHost() {
-  if (HOST && probeHost(HOST)) return HOST;
-  for (let i = 0; i < FALLBACK_HOSTS.length; i++) {
-    if (probeHost(FALLBACK_HOSTS[i])) {
-      HOST = FALLBACK_HOSTS[i];
+  for (let i = 0; i < HOSTS.length; i++) {
+    if (probeList(HOSTS[i])) {
+      HOST = HOSTS[i];
       return HOST;
     }
   }
-  for (let i = 0; i < PORTALS.length; i++) {
-    try {
-      const portal = PORTALS[i];
-      const html = httpGet(portal + '/');
-      const m = html.match(/strU\s*=\s*"([^"]+)"/);
-      if (!m) continue;
-      const jump = m[1] + portal + '/&p=/';
-      const page = httpGet(jump, { 'Referer': portal + '/' });
-      if (!page) continue;
-      for (let j = 0; j < FALLBACK_HOSTS.length; j++) {
-        if (probeHost(FALLBACK_HOSTS[j])) {
-          HOST = FALLBACK_HOSTS[j];
-          return HOST;
-        }
-      }
-    } catch (e) {}
-  }
-  HOST = FALLBACK_HOSTS[0];
+  HOST = HOSTS[0];
   return HOST;
 }
 
 function ensureHost() {
   if (!HOST) resolveHost();
   return HOST;
+}
+
+/**
+ * 拉取播放页：当前 HOST 若被跳成首页（无 AID），自动换其它镜像重试
+ */
+function fetchPlayPage(pathOrUrl) {
+  let path = pathOrUrl || '';
+  const m = path.match(/(\/v5\/\d+-\d+-\d+\.html)/i) || path.match(/(\/vodplay\/[^?]+\.html)/i);
+  if (m) path = m[1];
+  else if (path.indexOf('http') === 0) {
+    try {
+      const u = path.replace(/^https?:\/\/[^/]+/i, '');
+      path = u.charAt(0) === '/' ? u : '/' + u;
+    } catch (e) {}
+  }
+
+  const order = [HOST].concat(HOSTS.filter((h) => h !== HOST));
+  for (let i = 0; i < order.length; i++) {
+    const h = order[i];
+    const url = h + path;
+    const html = httpGet(url, { 'Referer': h + '/' });
+    if (isPlayHtml(html)) {
+      HOST = h;
+      return { html: html, url: url, host: h };
+    }
+  }
+  // 都失败则返回最后一次
+  const last = order[order.length - 1];
+  return { html: httpGet(last + path), url: last + path, host: last };
 }
 
 function parseTabs(html) {
@@ -138,11 +168,22 @@ function parseTabs(html) {
   while ((m = re.exec(block)) !== null) {
     let href = m[1];
     let name = m[2].replace(/<[^>]+>/g, '').trim().replace(/^\d+/, '').trim();
-    if (!href || !name) continue;
-    if (href.indexOf('vodtype') < 0) continue;
+    if (!href || !name || href.indexOf('vodtype') < 0) continue;
     if (seen[href]) continue;
     seen[href] = 1;
     tabs.push({ type_id: href, type_name: name });
+  }
+  if (tabs.length === 0) {
+    return [
+      { type_id: '/vodtype/8.html', type_name: '无码中文字幕' },
+      { type_id: '/vodtype/9.html', type_name: '有码中文字幕' },
+      { type_id: '/vodtype/10.html', type_name: '日本无码' },
+      { type_id: '/vodtype/7.html', type_name: '日本有码' },
+      { type_id: '/vodtype/26.html', type_name: '骑兵破解' },
+      { type_id: '/vodtype/15.html', type_name: '国产视频' },
+      { type_id: '/vodtype/21.html', type_name: '欧美高清' },
+      { type_id: '/vodtype/22.html', type_name: '动漫剧情' },
+    ];
   }
   return tabs;
 }
@@ -166,11 +207,8 @@ function parseList(html) {
     let m;
     while ((m = re.exec(html)) !== null) {
       let href, title, cover;
-      if (pi === 1) {
-        title = m[1]; href = m[2]; cover = m[3];
-      } else {
-        href = m[1]; title = m[2]; cover = m[3];
-      }
+      if (pi === 1) { title = m[1]; href = m[2]; cover = m[3]; }
+      else { href = m[1]; title = m[2]; cover = m[3]; }
       if (!href || !title || !isPlayPath(href)) continue;
       href = absUrl(href);
       if (seen[href]) continue;
@@ -179,24 +217,6 @@ function parseList(html) {
     }
     if (list.length > 0) break;
   }
-  try {
-    if (typeof load === 'function' && list.length === 0) {
-      const $ = load(html);
-      $('a.stui-vodlist__thumb').each((_, el) => {
-        const $a = $(el);
-        let href = $a.attr('href') || '';
-        if (!isPlayPath(href)) return;
-        const title = $a.attr('title') || '';
-        const cover = $a.attr('data-original') || $a.attr('data-src') || '';
-        const remarks = ($a.find('.pic-text').text() || '').trim();
-        if (!href || !title) return;
-        href = absUrl(href);
-        if (seen[href]) return;
-        seen[href] = 1;
-        list.push({ vod_id: href, vod_name: title, vod_pic: cover, vod_remarks: remarks });
-      });
-    }
-  } catch (e) {}
   return list;
 }
 
@@ -208,7 +228,9 @@ function b64decode(s) {
     }
   } catch (e) {}
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-  let str = String(s).replace(/[^A-Za-z0-9+/=]/g, '').replace(/=+$/, '');
+  let str = String(s).replace(/[^A-Za-z0-9+/=]/g, '');
+  const pad = str.length % 4;
+  if (pad) str += '===='.slice(pad);
   let output = '';
   if (str.length % 4 === 1) return '';
   for (let bc = 0, bs, buffer, idx = 0; (buffer = str.charAt(idx++)); ~buffer && (bs = bc % 4 ? bs * 64 + buffer : buffer, bc++ % 4) ? output += String.fromCharCode(255 & (bs >> ((-2 * bc) & 6))) : 0) {
@@ -217,7 +239,8 @@ function b64decode(s) {
   return output;
 }
 
-function resolveByCountApi(html, pageUrl) {
+function resolveByCountApi(html, pageUrl, host) {
+  const h = host || HOST;
   const aid = (html.match(/AID\s*=\s*'(\d+)'/) || html.match(/AID\s*=\s*"(\d+)"/) || [])[1];
   const asid = (html.match(/ASID\s*=\s*'(\d+)'/) || html.match(/ASID\s*=\s*"(\d+)"/) || [])[1] || '1';
   const anid = (html.match(/ANID\s*=\s*'(\d+)'/) || html.match(/ANID\s*=\s*"(\d+)"/) || [])[1] || '1';
@@ -231,63 +254,64 @@ function resolveByCountApi(html, pageUrl) {
     '&tk=' + encodeURIComponent(ak) +
     '&g=1&x=180&y=360&dt=1200&sw=390&sh=844&tz=-480&t=' + Date.now();
 
-  const resp = httpPost(HOST + '/static/count.php', body, {
+  // 对象形式再试一次（部分壳只认 data 对象）
+  let resp = httpPost(h + '/static/count.php', body, {
     'Referer': pageUrl,
-    'Origin': HOST,
+    'Origin': h,
   });
-  if (!resp) return '';
 
+  if (!resp || resp.length < 5) {
+    try {
+      const dataObj = {
+        id: aid, sid: asid, nid: anid, tk: ak,
+        g: 1, x: 180, y: 360, dt: 1200, sw: 390, sh: 844, tz: -480, t: Date.now(),
+      };
+      const res2 = req(h + '/static/count.php', {
+        method: 'post',
+        headers: headers({
+          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+          'X-Requested-With': 'XMLHttpRequest',
+          'Referer': pageUrl,
+          'Origin': h,
+        }),
+        data: dataObj,
+        postType: 'form',
+        timeout: 20000,
+      });
+      if (typeof res2 === 'string') resp = res2;
+      else if (res2) resp = res2.content || res2.body || res2.data || '';
+    } catch (e) {}
+  }
+
+  if (!resp) return '';
   try {
     const j = JSON.parse(resp);
     if (j && j.ok && j.u) {
       const u = b64decode(j.u);
       if (u && u.indexOf('http') === 0) return u;
     }
-    // 有的返回直接在 url 字段
-    if (j && j.url && String(j.url).indexOf('http') === 0) return j.url;
   } catch (e) {}
-
-  // 非 JSON：整段 base64 或纯链接
-  const t = resp.trim().replace(/^"|"$/g, '');
-  if (t.indexOf('http') === 0) return t;
-  if (/^[A-Za-z0-9+/=]+$/.test(t) && t.length > 20) {
-    try {
-      const u = b64decode(t);
-      if (u && u.indexOf('http') === 0) return u;
-    } catch (e) {}
-  }
-  // 从文本抠
-  const m = resp.match(/https?:\/\/[^\s"'<>\\]+?\.(?:m3u8|mp4)[^\s"'<>\\]*/i);
-  if (m) return m[0];
-  return '';
+  const m = String(resp).match(/https?:\/\/[^\s"'<>\\]+?\.(?:m3u8|mp4)[^\s"'<>\\]*/i);
+  return m ? m[0] : '';
 }
 
-function resolvePlayerAaaa(html) {
-  let encrypt = 0;
+function extractPlayUrl(html, pageUrl, host) {
+  let u = resolveByCountApi(html, pageUrl, host);
+  if (u) return u;
+  // player_aaaa 兜底
   const em = html.match(/"encrypt"\s*:\s*(\d+)/);
-  if (em) encrypt = parseInt(em[1]) || 0;
+  const encrypt = em ? parseInt(em[1]) : 0;
   let um = html.match(/player_aaaa[\s\S]{0,1500}?"url"\s*:\s*"([^"]+)"/);
-  if (!um) um = html.match(/"url"\s*:\s*"(https?:[^"]+\.(?:m3u8|mp4)[^"]*)"/i);
-  if (!um) return '';
-  let enc = um[1];
-  try {
+  if (um) {
+    let enc = um[1];
     if (encrypt === 2) {
-      let s = b64decode(enc);
-      try { s = decodeURIComponent(s); } catch (e) {}
-      return s;
-    }
-    if (encrypt === 1) {
-      try { return decodeURIComponent(enc); } catch (e) { return enc; }
-    }
-  } catch (e) {}
-  return enc;
-}
-
-function extractPlayUrl(html, pageUrl) {
-  let u = resolveByCountApi(html, pageUrl);
-  if (u) return u;
-  u = resolvePlayerAaaa(html);
-  if (u) return u;
+      try {
+        let s = b64decode(enc);
+        try { s = decodeURIComponent(s); } catch (e2) {}
+        if (s.indexOf('http') === 0) return s;
+      } catch (e) {}
+    } else if (enc.indexOf('http') === 0) return enc;
+  }
   const m = html.match(/https?:\/\/[^\s"'<>]+?\.(?:m3u8|mp4)[^\s"'<>]*/i);
   return m ? m[0] : '';
 }
@@ -305,29 +329,16 @@ async function init(cfg) {
       HOST = ext.replace(/\/$/, '');
     }
   } catch (e) {}
-  try { ensureHost(); } catch (e) {}
+  try { resolveHost(); } catch (e) { HOST = HOSTS[0]; }
 }
 
 async function home(filter) {
   try {
     ensureHost();
     const html = httpGet(HOST + '/');
-    let tabs = parseTabs(html || '');
-    if (tabs.length === 0) {
-      tabs = [
-        { type_id: '/vodtype/8.html', type_name: '无码中文字幕' },
-        { type_id: '/vodtype/9.html', type_name: '有码中文字幕' },
-        { type_id: '/vodtype/10.html', type_name: '日本无码' },
-        { type_id: '/vodtype/7.html', type_name: '日本有码' },
-        { type_id: '/vodtype/26.html', type_name: '骑兵破解' },
-        { type_id: '/vodtype/15.html', type_name: '国产视频' },
-        { type_id: '/vodtype/21.html', type_name: '欧美高清' },
-        { type_id: '/vodtype/22.html', type_name: '动漫剧情' },
-      ];
-    }
-    return JSON.stringify({ class: tabs, filters: {} });
+    return JSON.stringify({ class: parseTabs(html || ''), filters: {} });
   } catch (e) {
-    return JSON.stringify({ class: [], filters: {} });
+    return JSON.stringify({ class: parseTabs(''), filters: {} });
   }
 }
 
@@ -347,11 +358,11 @@ async function category(tid, pg, filter, extend) {
     ensureHost();
     const page = parseInt(pg) || 1;
     let typeurl = tid || '/vodtype/8.html';
-    if (typeurl.indexOf('http') !== 0) {
-      typeurl = typeurl.charAt(0) === '/' ? typeurl : '/' + typeurl;
+    if (typeurl.indexOf('http') === 0) {
+      typeurl = typeurl.replace(/^https?:\/\/[^/]+/i, '');
     }
-    let path = typeurl.replace(/\.html$/i, '-' + page + '.html');
-    if (path.indexOf('http') !== 0) path = HOST + path;
+    if (typeurl.charAt(0) !== '/') typeurl = '/' + typeurl;
+    const path = HOST + typeurl.replace(/\.html$/i, '-' + page + '.html');
     const html = httpGet(path);
     if (isChallenge(html)) {
       return JSON.stringify({ page: page, pagecount: 1, limit: 24, total: 0, list: [tip('分类无法访问')] });
@@ -372,35 +383,37 @@ async function category(tid, pg, filter, extend) {
 async function detail(id) {
   try {
     ensureHost();
-    const url = absUrl(id);
-    const html = httpGet(url, { 'Referer': HOST + '/' });
+    const fetched = fetchPlayPage(id);
+    const html = fetched.html || '';
+    const pageUrl = fetched.url;
 
     let title = '';
-    // 避免抓到「目录」菜单
-    let m = html.match(/stui-vodlist__thumb[^>]*title="([^"]+)"/i);
-    if (!m) m = html.match(/<h3[^>]*class="[^"]*title[^"]*"[^>]*>([\s\S]*?)<\/h3>/i);
-    if (!m) m = html.match(/AID\s*=\s*'(\d+)'/);
-    if (m) {
-      title = m[1].replace(/<[^>]+>/g, '').trim();
-      if (title === '目录' || /^\d+$/.test(title)) title = '';
+    let m = html.match(/class="stui-vodlist__thumb[^"]*"[^>]*title="([^"]+)"/i);
+    if (m && m[1] !== '目录') title = m[1];
+    if (!title) {
+      m = html.match(/AID\s*=\s*'(\d+)'/);
+      // 从 title 标签
+      const t = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+      if (t) {
+        title = t[1].replace(/<[^>]+>/g, '').trim().split(/[|\-]/)[0].trim();
+        if (title.indexOf('黄色仓库') >= 0 || title.indexOf('hsck') >= 0) title = '';
+      }
     }
     if (!title) {
-      m = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-      if (m) title = m[1].replace(/<[^>]+>/g, '').trim().split(/[|\-]/)[0].trim();
+      // 用路径里的 id
+      const idm = String(id).match(/\/v5\/(\d+)/);
+      title = idm ? ('影片' + idm[1]) : '桃花族';
     }
 
-    // 在详情阶段就尝试解析播放地址（失败则 play 再试）
-    let media = '';
-    try { media = extractPlayUrl(html, url); } catch (e) {}
-
+    // 不在详情预解析（token 可能过期），play 时再解
     return JSON.stringify({
       list: [{
-        vod_id: url,
-        vod_name: title || '桃花族',
+        vod_id: pageUrl || absUrl(id),
+        vod_name: title,
         vod_pic: '',
-        vod_content: '',
+        vod_content: isPlayHtml(html) ? '' : '播放页异常，将自动换镜像',
         vod_play_from: '默认分组',
-        vod_play_url: '播放$' + (media || url),
+        vod_play_url: '播放$' + (pageUrl || absUrl(id)),
       }],
     });
   } catch (e) {
@@ -411,7 +424,7 @@ async function detail(id) {
         vod_pic: '',
         vod_content: String(e),
         vod_play_from: '默认分组',
-        vod_play_url: '播放$',
+        vod_play_url: '播放$' + absUrl(id),
       }],
     });
   }
@@ -427,17 +440,12 @@ async function play(flag, id, flags) {
         parse: 0,
         jx: 0,
         url: key,
-        header: {
-          'User-Agent': UA,
-          'Referer': HOST + '/',
-          'Origin': HOST,
-        },
+        header: { 'User-Agent': UA, 'Referer': HOST + '/', 'Origin': HOST },
       });
     }
 
-    const pageUrl = absUrl(key);
-    const html = httpGet(pageUrl, { 'Referer': HOST + '/' });
-    const media = extractPlayUrl(html, pageUrl);
+    const fetched = fetchPlayPage(key);
+    const media = extractPlayUrl(fetched.html || '', fetched.url, fetched.host);
 
     if (media && /\.(m3u8|mp4)/i.test(media)) {
       return JSON.stringify({
@@ -446,18 +454,17 @@ async function play(flag, id, flags) {
         url: media,
         header: {
           'User-Agent': UA,
-          'Referer': HOST + '/',
-          'Origin': HOST,
+          'Referer': (fetched.host || HOST) + '/',
+          'Origin': fetched.host || HOST,
         },
       });
     }
 
-    // 解析失败时不要把页面 HTML 地址当媒体源
     return JSON.stringify({
       parse: 0,
       jx: 0,
       url: '',
-      message: '播放解析失败，请换节点或稍后重试',
+      message: '播放解析失败(无AID或POST失败)，请换节点/镜像',
       header: { 'User-Agent': UA },
     });
   } catch (e) {
@@ -477,7 +484,6 @@ async function search(wd, quick, pg) {
     const page = parseInt(pg) || 1;
     const url = HOST + '/vodsearch/' + encodeURIComponent(wd || '') + '----------' + page + '---.html';
     const html = httpGet(url);
-    if (isChallenge(html)) return JSON.stringify({ list: [tip('搜索无法访问')] });
     return JSON.stringify({ page: page, pagecount: 1, list: parseList(html) });
   } catch (e) {
     return JSON.stringify({ list: [] });
