@@ -158,65 +158,88 @@ function parseTabs(html) {
   return tabs;
 }
 
+function isPlayPath(href) {
+  if (!href) return false;
+  // 只要站内播放页，过滤广告外链
+  if (/^https?:\/\//i.test(href) && href.indexOf('/v5/') < 0 && href.indexOf('/vodplay') < 0) return false;
+  return href.indexOf('/v5/') >= 0 || href.indexOf('/vodplay') >= 0 || href.indexOf('/voddetail') >= 0;
+}
+
 function parseList(html) {
   const list = [];
   const seen = {};
+
+  // 优先：明确匹配 /v5/ 播放卡片（带 title + data-original）
+  const reV5 = /class="stui-vodlist__thumb[^"]*"[^>]*href="((?:\/v5\/|\/vodplay\/)[^"]+)"[^>]*title="([^"]+)"[^>]*data-original="([^"]*)"/gi;
+  let m;
+  while ((m = reV5.exec(html)) !== null) {
+    const href = absUrl(m[1]);
+    if (seen[href]) continue;
+    seen[href] = 1;
+    list.push({
+      vod_id: href,
+      vod_name: m[2],
+      vod_pic: m[3] || '',
+      vod_remarks: '',
+    });
+  }
+  // 属性顺序可能不同
+  if (list.length === 0) {
+    const re2 = /class="stui-vodlist__thumb[^"]*"[^>]*title="([^"]+)"[^>]*href="((?:\/v5\/|\/vodplay\/)[^"]+)"[^>]*data-original="([^"]*)"/gi;
+    while ((m = re2.exec(html)) !== null) {
+      const href = absUrl(m[2]);
+      if (seen[href]) continue;
+      seen[href] = 1;
+      list.push({ vod_id: href, vod_name: m[1], vod_pic: m[3] || '', vod_remarks: '' });
+    }
+  }
+  // data-original 在前
+  if (list.length === 0) {
+    const re3 = /href="((?:\/v5\/|\/vodplay\/)[^"]+)"[^>]*title="([^"]+)"[^>]*(?:data-original|src)="([^"]+)"/gi;
+    while ((m = re3.exec(html)) !== null) {
+      const href = absUrl(m[1]);
+      if (seen[href]) continue;
+      seen[href] = 1;
+      list.push({ vod_id: href, vod_name: m[2], vod_pic: m[3] || '', vod_remarks: '' });
+    }
+  }
+
   try {
-    if (typeof load === 'function') {
+    if (typeof load === 'function' && list.length === 0) {
       const $ = load(html);
       $('.stui-vodlist li, .stui-vodlist__box').each((_, el) => {
         const $el = $(el);
-        const $a = $el.find('.stui-vodlist__thumb').first().length
-          ? $el.find('.stui-vodlist__thumb').first()
-          : $el.find('a').first();
+        const $a = $el.find('a.stui-vodlist__thumb').first();
+        if (!$a.length) return;
         let href = $a.attr('href') || '';
-        let title = $a.attr('title') || ($el.find('.title a').text() || '').trim() || ($a.text() || '').trim();
-        let cover = $a.attr('data-original') || $a.find('img').attr('data-original')
-          || $a.find('img').attr('src') || $el.find('img').attr('data-original') || '';
+        if (!isPlayPath(href)) return;
+        let title = $a.attr('title') || ($el.find('h4.title a').text() || '').trim();
+        let cover = $a.attr('data-original') || $a.attr('data-src') || $a.find('img').attr('data-original') || $a.find('img').attr('src') || '';
         const remarks = ($el.find('.pic-text').text() || '').trim();
         if (!href || !title) return;
-        // 只要播放/详情页
-        if (href.indexOf('/vodplay') < 0 && href.indexOf('/v5/') < 0 && href.indexOf('/voddetail') < 0) return;
         href = absUrl(href);
         if (seen[href]) return;
         seen[href] = 1;
         list.push({
           vod_id: href,
           vod_name: title,
-          vod_pic: absUrl(cover),
+          vod_pic: cover,
           vod_remarks: remarks,
         });
       });
     }
   } catch (e) {}
-  if (list.length > 0) return list;
 
-  const re = /class="stui-vodlist__thumb[^"]*"[^>]*(?:href="([^"]+)"[^>]*title="([^"]*)"|title="([^"]*)"[^>]*href="([^"]+)")[^>]*(?:data-original="([^"]*)")?/gi;
-  let m;
-  while ((m = re.exec(html)) !== null) {
-    const href = m[1] || m[4];
-    const title = m[2] || m[3];
-    const cover = m[5] || '';
-    if (!href || !title) continue;
-    if (href.indexOf('/vodplay') < 0 && href.indexOf('/v5/') < 0) continue;
-    const u = absUrl(href);
-    if (seen[u]) continue;
-    seen[u] = 1;
-    list.push({
-      vod_id: u,
-      vod_name: title,
-      vod_pic: absUrl(cover),
-      vod_remarks: '',
-    });
-  }
-  // 更宽松
-  if (list.length === 0) {
-    const re2 = /href="((?:\/vodplay\/|\/v5\/)[^"]+)"[^>]*title="([^"]+)"/gi;
-    while ((m = re2.exec(html)) !== null) {
-      const u = absUrl(m[1]);
-      if (seen[u]) continue;
-      seen[u] = 1;
-      list.push({ vod_id: u, vod_name: m[2], vod_pic: '', vod_remarks: '' });
+  // 补 duration 备注
+  if (list.length > 0) {
+    for (let i = 0; i < list.length; i++) {
+      if (list[i].vod_remarks) continue;
+      try {
+        const idPart = (list[i].vod_id.match(/\/v5\/(\d+)/) || [])[1];
+        if (!idPart) continue;
+        const rm = html.match(new RegExp('href="[^"]*' + idPart + '[^"]*"[\\s\\S]{0,200}?pic-text[^>]*>([^<]+)', 'i'));
+        if (rm) list[i].vod_remarks = rm[1].trim();
+      } catch (e) {}
     }
   }
   return list;
