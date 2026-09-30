@@ -1,13 +1,10 @@
 /**
  * 桃花族 / 黄色仓库 - 蜂蜜影视 CatVod JS Spider
- * 入口会跳转最新域名；播放走 POST /static/count.php 取 m3u8
+ * 播放: POST /static/count.php → base64(m3u8)
  */
 const UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1';
-const PORTALS = [
-  'http://hscangku.com',
-  'http://920ck.us',
-  'http://7340hsck.cc',
-];
+const PORTALS = ['http://hscangku.com', 'http://920ck.us', 'http://7340hsck.cc'];
+const FALLBACK_HOSTS = ['https://222.agsck.cc', 'https://444.0ock.cc'];
 
 let HOST = '';
 let siteKey = '';
@@ -20,9 +17,7 @@ function headers(extra) {
     'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
   };
   if (HOST) h['Referer'] = HOST + '/';
-  if (extra) {
-    for (const k in extra) h[k] = extra[k];
-  }
+  if (extra) for (const k in extra) h[k] = extra[k];
   return h;
 }
 
@@ -32,7 +27,7 @@ function httpGet(url, extra) {
     const res = req(url, { method: 'get', headers: headers(extra), timeout: 20000 });
     if (typeof res === 'string') html = res;
     else if (res) {
-      html = res.content || res.body || res.data || '';
+      html = res.content || res.body || res.data || res.text || '';
       if (typeof html !== 'string') html = String(html);
     }
   } catch (e1) {
@@ -43,32 +38,35 @@ function httpGet(url, extra) {
   return html || '';
 }
 
-function httpPost(url, body, extra) {
+function httpPost(url, formBody, extra) {
   let html = '';
   const h = headers(Object.assign({
     'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
     'X-Requested-With': 'XMLHttpRequest',
+    'Accept': 'application/json, text/javascript, */*; q=0.01',
   }, extra || {}));
-  try {
-    const res = req(url, {
-      method: 'post',
-      headers: h,
-      body: body,
-      data: body,
-      postType: 'form',
-      timeout: 20000,
-    });
-    if (typeof res === 'string') html = res;
-    else if (res) {
-      html = res.content || res.body || res.data || '';
-      if (typeof html !== 'string') html = String(html);
-    }
-  } catch (e1) {
+
+  // 多种 POST 写法兼容不同壳
+  const attempts = [
+    () => req(url, { method: 'post', headers: h, body: formBody, data: formBody, postType: 'form', timeout: 20000 }),
+    () => req(url, { method: 'POST', headers: h, data: formBody, timeout: 20000 }),
+    () => req(url, { headers: h, body: formBody, method: 'post', timeout: 20000 }),
+  ];
+  if (typeof post === 'function') {
+    attempts.push(() => post(url, formBody, { headers: h }));
+  }
+  if (typeof request === 'function') {
+    attempts.push(() => request(url, { method: 'POST', headers: h, body: formBody, data: formBody }));
+  }
+
+  for (let i = 0; i < attempts.length; i++) {
     try {
-      if (typeof request === 'function') {
-        html = request(url, { method: 'POST', headers: h, body: body, data: body });
-      }
-    } catch (e2) {}
+      const res = attempts[i]();
+      if (typeof res === 'string') html = res;
+      else if (res) html = res.content || res.body || res.data || res.text || '';
+      if (typeof html !== 'string') html = String(html || '');
+      if (html && html.length > 5) break;
+    } catch (e) {}
   }
   return html || '';
 }
@@ -77,58 +75,51 @@ function absUrl(u) {
   if (!u) return '';
   if (u.indexOf('http') === 0) return u;
   if (u.indexOf('//') === 0) return 'https:' + u;
-  const base = HOST || PORTALS[0];
-  if (u.charAt(0) === '/') return base + u;
-  return base + '/' + u;
+  const base = HOST || FALLBACK_HOSTS[0];
+  return base + (u.charAt(0) === '/' ? u : '/' + u);
 }
 
 function isChallenge(html) {
-  if (!html || html.length < 50) return true;
+  if (!html || html.length < 40) return true;
   return /Just a moment|cf-mitigated|challenge-platform/i.test(html);
 }
 
-/** 从门户跳转拿到真实站点域名 */
+function probeHost(c) {
+  try {
+    const test = httpGet(c + '/');
+    if (test && (test.indexOf('stui-') >= 0 || test.indexOf('vodtype') >= 0 || test.indexOf('/v5/') >= 0)) {
+      return true;
+    }
+  } catch (e) {}
+  return false;
+}
+
 function resolveHost() {
-  if (HOST && HOST.indexOf('http') === 0) return HOST;
+  if (HOST && probeHost(HOST)) return HOST;
+  for (let i = 0; i < FALLBACK_HOSTS.length; i++) {
+    if (probeHost(FALLBACK_HOSTS[i])) {
+      HOST = FALLBACK_HOSTS[i];
+      return HOST;
+    }
+  }
   for (let i = 0; i < PORTALS.length; i++) {
-    const portal = PORTALS[i];
     try {
+      const portal = PORTALS[i];
       const html = httpGet(portal + '/');
       const m = html.match(/strU\s*=\s*"([^"]+)"/);
       if (!m) continue;
       const jump = m[1] + portal + '/&p=/';
       const page = httpGet(jump, { 'Referer': portal + '/' });
-      if (!page || isChallenge(page)) continue;
-      // 从页面里的链接猜 host，或用 maccms.url
-      let host = '';
-      const mu = page.match(/"url"\s*:\s*"(https?:\/\/[^"]+)"/);
-      if (mu) host = mu[1].replace(/\/$/, '');
-      if (!host) {
-        const link = page.match(/href="(https?:\/\/[^"/]+)/);
-        if (link) host = link[1];
-      }
-      // 若跳转页本身已是内容站
-      if (page.indexOf('stui-vodlist') >= 0 || page.indexOf('stui-pannel') >= 0) {
-        // 尝试从常见结构提取
-        const a = page.match(/https?:\/\/[a-z0-9.-]+\.(?:agsck|0ock|hsck|ck)\.[a-z]+/i);
-        if (a) host = a[0];
-      }
-      // 直接探测已知可用域
-      const candidates = [];
-      if (host) candidates.push(host);
-      candidates.push('https://222.agsck.cc', 'https://444.0ock.cc');
-      for (let j = 0; j < candidates.length; j++) {
-        const c = candidates[j].replace(/\/$/, '');
-        const test = httpGet(c + '/');
-        if (test && (test.indexOf('stui-') >= 0 || test.indexOf('vodtype') >= 0)) {
-          HOST = c;
+      if (!page) continue;
+      for (let j = 0; j < FALLBACK_HOSTS.length; j++) {
+        if (probeHost(FALLBACK_HOSTS[j])) {
+          HOST = FALLBACK_HOSTS[j];
           return HOST;
         }
       }
     } catch (e) {}
   }
-  // 兜底
-  HOST = 'https://222.agsck.cc';
+  HOST = FALLBACK_HOSTS[0];
   return HOST;
 }
 
@@ -146,11 +137,9 @@ function parseTabs(html) {
   let m;
   while ((m = re.exec(block)) !== null) {
     let href = m[1];
-    let name = m[2].replace(/<[^>]+>/g, '').trim();
-    // 去掉数量前缀如 5038无码
-    name = name.replace(/^\d+/, '').trim();
+    let name = m[2].replace(/<[^>]+>/g, '').trim().replace(/^\d+/, '').trim();
     if (!href || !name) continue;
-    if (href.indexOf('vodtype') < 0 && href.indexOf('/type/') < 0) continue;
+    if (href.indexOf('vodtype') < 0) continue;
     if (seen[href]) continue;
     seen[href] = 1;
     tabs.push({ type_id: href, type_name: name });
@@ -160,88 +149,54 @@ function parseTabs(html) {
 
 function isPlayPath(href) {
   if (!href) return false;
-  // 只要站内播放页，过滤广告外链
   if (/^https?:\/\//i.test(href) && href.indexOf('/v5/') < 0 && href.indexOf('/vodplay') < 0) return false;
-  return href.indexOf('/v5/') >= 0 || href.indexOf('/vodplay') >= 0 || href.indexOf('/voddetail') >= 0;
+  return href.indexOf('/v5/') >= 0 || href.indexOf('/vodplay') >= 0;
 }
 
 function parseList(html) {
   const list = [];
   const seen = {};
-
-  // 优先：明确匹配 /v5/ 播放卡片（带 title + data-original）
-  const reV5 = /class="stui-vodlist__thumb[^"]*"[^>]*href="((?:\/v5\/|\/vodplay\/)[^"]+)"[^>]*title="([^"]+)"[^>]*data-original="([^"]*)"/gi;
-  let m;
-  while ((m = reV5.exec(html)) !== null) {
-    const href = absUrl(m[1]);
-    if (seen[href]) continue;
-    seen[href] = 1;
-    list.push({
-      vod_id: href,
-      vod_name: m[2],
-      vod_pic: m[3] || '',
-      vod_remarks: '',
-    });
-  }
-  // 属性顺序可能不同
-  if (list.length === 0) {
-    const re2 = /class="stui-vodlist__thumb[^"]*"[^>]*title="([^"]+)"[^>]*href="((?:\/v5\/|\/vodplay\/)[^"]+)"[^>]*data-original="([^"]*)"/gi;
-    while ((m = re2.exec(html)) !== null) {
-      const href = absUrl(m[2]);
+  const patterns = [
+    /class="stui-vodlist__thumb[^"]*"[^>]*href="((?:\/v5\/|\/vodplay\/)[^"]+)"[^>]*title="([^"]+)"[^>]*data-original="([^"]*)"/gi,
+    /class="stui-vodlist__thumb[^"]*"[^>]*title="([^"]+)"[^>]*href="((?:\/v5\/|\/vodplay\/)[^"]+)"[^>]*data-original="([^"]*)"/gi,
+    /href="((?:\/v5\/|\/vodplay\/)[^"]+)"[^>]*title="([^"]+)"[^>]*(?:data-original|src)="([^"]+)"/gi,
+  ];
+  for (let pi = 0; pi < patterns.length; pi++) {
+    const re = patterns[pi];
+    let m;
+    while ((m = re.exec(html)) !== null) {
+      let href, title, cover;
+      if (pi === 1) {
+        title = m[1]; href = m[2]; cover = m[3];
+      } else {
+        href = m[1]; title = m[2]; cover = m[3];
+      }
+      if (!href || !title || !isPlayPath(href)) continue;
+      href = absUrl(href);
       if (seen[href]) continue;
       seen[href] = 1;
-      list.push({ vod_id: href, vod_name: m[1], vod_pic: m[3] || '', vod_remarks: '' });
+      list.push({ vod_id: href, vod_name: title, vod_pic: cover || '', vod_remarks: '' });
     }
+    if (list.length > 0) break;
   }
-  // data-original 在前
-  if (list.length === 0) {
-    const re3 = /href="((?:\/v5\/|\/vodplay\/)[^"]+)"[^>]*title="([^"]+)"[^>]*(?:data-original|src)="([^"]+)"/gi;
-    while ((m = re3.exec(html)) !== null) {
-      const href = absUrl(m[1]);
-      if (seen[href]) continue;
-      seen[href] = 1;
-      list.push({ vod_id: href, vod_name: m[2], vod_pic: m[3] || '', vod_remarks: '' });
-    }
-  }
-
   try {
     if (typeof load === 'function' && list.length === 0) {
       const $ = load(html);
-      $('.stui-vodlist li, .stui-vodlist__box').each((_, el) => {
-        const $el = $(el);
-        const $a = $el.find('a.stui-vodlist__thumb').first();
-        if (!$a.length) return;
+      $('a.stui-vodlist__thumb').each((_, el) => {
+        const $a = $(el);
         let href = $a.attr('href') || '';
         if (!isPlayPath(href)) return;
-        let title = $a.attr('title') || ($el.find('h4.title a').text() || '').trim();
-        let cover = $a.attr('data-original') || $a.attr('data-src') || $a.find('img').attr('data-original') || $a.find('img').attr('src') || '';
-        const remarks = ($el.find('.pic-text').text() || '').trim();
+        const title = $a.attr('title') || '';
+        const cover = $a.attr('data-original') || $a.attr('data-src') || '';
+        const remarks = ($a.find('.pic-text').text() || '').trim();
         if (!href || !title) return;
         href = absUrl(href);
         if (seen[href]) return;
         seen[href] = 1;
-        list.push({
-          vod_id: href,
-          vod_name: title,
-          vod_pic: cover,
-          vod_remarks: remarks,
-        });
+        list.push({ vod_id: href, vod_name: title, vod_pic: cover, vod_remarks: remarks });
       });
     }
   } catch (e) {}
-
-  // 补 duration 备注
-  if (list.length > 0) {
-    for (let i = 0; i < list.length; i++) {
-      if (list[i].vod_remarks) continue;
-      try {
-        const idPart = (list[i].vod_id.match(/\/v5\/(\d+)/) || [])[1];
-        if (!idPart) continue;
-        const rm = html.match(new RegExp('href="[^"]*' + idPart + '[^"]*"[\\s\\S]{0,200}?pic-text[^>]*>([^<]+)', 'i'));
-        if (rm) list[i].vod_remarks = rm[1].trim();
-      } catch (e) {}
-    }
-  }
   return list;
 }
 
@@ -252,9 +207,8 @@ function b64decode(s) {
       return CryptoJS.enc.Base64.parse(s).toString(CryptoJS.enc.Utf8);
     }
   } catch (e) {}
-  // pure js
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-  let str = String(s).replace(/=+$/, '');
+  let str = String(s).replace(/[^A-Za-z0-9+/=]/g, '').replace(/=+$/, '');
   let output = '';
   if (str.length % 4 === 1) return '';
   for (let bc = 0, bs, buffer, idx = 0; (buffer = str.charAt(idx++)); ~buffer && (bs = bc % 4 ? bs * 64 + buffer : buffer, bc++ % 4) ? output += String.fromCharCode(255 & (bs >> ((-2 * bc) & 6))) : 0) {
@@ -263,12 +217,11 @@ function b64decode(s) {
   return output;
 }
 
-/** 新版：POST /static/count.php */
 function resolveByCountApi(html, pageUrl) {
-  const aid = (html.match(/AID\s*=\s*'(\d+)'/) || [])[1];
-  const asid = (html.match(/ASID\s*=\s*'(\d+)'/) || [])[1] || '1';
-  const anid = (html.match(/ANID\s*=\s*'(\d+)'/) || [])[1] || '1';
-  const ak = (html.match(/AK\s*=\s*'([^']+)'/) || [])[1];
+  const aid = (html.match(/AID\s*=\s*'(\d+)'/) || html.match(/AID\s*=\s*"(\d+)"/) || [])[1];
+  const asid = (html.match(/ASID\s*=\s*'(\d+)'/) || html.match(/ASID\s*=\s*"(\d+)"/) || [])[1] || '1';
+  const anid = (html.match(/ANID\s*=\s*'(\d+)'/) || html.match(/ANID\s*=\s*"(\d+)"/) || [])[1] || '1';
+  const ak = (html.match(/AK\s*=\s*'([0-9a-fA-F]+)'/) || html.match(/AK\s*=\s*"([0-9a-fA-F]+)"/) || [])[1];
   if (!aid || !ak) return '';
 
   const body =
@@ -276,34 +229,47 @@ function resolveByCountApi(html, pageUrl) {
     '&sid=' + encodeURIComponent(asid) +
     '&nid=' + encodeURIComponent(anid) +
     '&tk=' + encodeURIComponent(ak) +
-    '&g=1&x=120&y=340&dt=800&sw=390&sh=844&tz=-480&t=' + Date.now();
+    '&g=1&x=180&y=360&dt=1200&sw=390&sh=844&tz=-480&t=' + Date.now();
 
   const resp = httpPost(HOST + '/static/count.php', body, {
     'Referer': pageUrl,
     'Origin': HOST,
   });
+  if (!resp) return '';
+
   try {
     const j = JSON.parse(resp);
     if (j && j.ok && j.u) {
-      return b64decode(j.u);
+      const u = b64decode(j.u);
+      if (u && u.indexOf('http') === 0) return u;
     }
+    // 有的返回直接在 url 字段
+    if (j && j.url && String(j.url).indexOf('http') === 0) return j.url;
   } catch (e) {}
-  // 有时直接返回
-  if (resp && resp.indexOf('http') === 0) return resp.trim();
+
+  // 非 JSON：整段 base64 或纯链接
+  const t = resp.trim().replace(/^"|"$/g, '');
+  if (t.indexOf('http') === 0) return t;
+  if (/^[A-Za-z0-9+/=]+$/.test(t) && t.length > 20) {
+    try {
+      const u = b64decode(t);
+      if (u && u.indexOf('http') === 0) return u;
+    } catch (e) {}
+  }
+  // 从文本抠
+  const m = resp.match(/https?:\/\/[^\s"'<>\\]+?\.(?:m3u8|mp4)[^\s"'<>\\]*/i);
+  if (m) return m[0];
   return '';
 }
 
-/** 旧版 player_aaaa */
 function resolvePlayerAaaa(html) {
-  let enc = '';
   let encrypt = 0;
   const em = html.match(/"encrypt"\s*:\s*(\d+)/);
   if (em) encrypt = parseInt(em[1]) || 0;
-  let um = html.match(/"encrypt"\s*:\s*\d+[\s\S]{0,80}?"url"\s*:\s*"([^"]+)"/);
-  if (!um) um = html.match(/player_aaaa[\s\S]{0,1200}?"url"\s*:\s*"([^"]+)"/);
-  if (!um) um = html.match(/"url"\s*:\s*"(https?:[^"]+)"/);
-  if (um) enc = um[1];
-  if (!enc) return '';
+  let um = html.match(/player_aaaa[\s\S]{0,1500}?"url"\s*:\s*"([^"]+)"/);
+  if (!um) um = html.match(/"url"\s*:\s*"(https?:[^"]+\.(?:m3u8|mp4)[^"]*)"/i);
+  if (!um) return '';
+  let enc = um[1];
   try {
     if (encrypt === 2) {
       let s = b64decode(enc);
@@ -369,9 +335,7 @@ async function homeVod() {
   try {
     ensureHost();
     const html = httpGet(HOST + '/vodtype/8-1.html');
-    if (isChallenge(html)) {
-      return JSON.stringify({ list: [tip('站点无法访问，可 ext 填最新域名')] });
-    }
+    if (isChallenge(html)) return JSON.stringify({ list: [tip('站点无法访问')] });
     return JSON.stringify({ list: parseList(html).slice(0, 24) });
   } catch (e) {
     return JSON.stringify({ list: [] });
@@ -383,24 +347,14 @@ async function category(tid, pg, filter, extend) {
     ensureHost();
     const page = parseInt(pg) || 1;
     let typeurl = tid || '/vodtype/8.html';
-    if (typeurl.indexOf('http') === 0) {
-      // full url
-    } else {
+    if (typeurl.indexOf('http') !== 0) {
       typeurl = typeurl.charAt(0) === '/' ? typeurl : '/' + typeurl;
     }
-    // /vodtype/8.html -> /vodtype/8-1.html
     let path = typeurl.replace(/\.html$/i, '-' + page + '.html');
-    if (path.indexOf('http') === 0) {
-      // ok
-    } else {
-      path = HOST + path;
-    }
+    if (path.indexOf('http') !== 0) path = HOST + path;
     const html = httpGet(path);
     if (isChallenge(html)) {
-      return JSON.stringify({
-        page: page, pagecount: 1, limit: 24, total: 0,
-        list: [tip('分类无法访问')],
-      });
+      return JSON.stringify({ page: page, pagecount: 1, limit: 24, total: 0, list: [tip('分类无法访问')] });
     }
     const list = parseList(html);
     return JSON.stringify({
@@ -418,28 +372,27 @@ async function category(tid, pg, filter, extend) {
 async function detail(id) {
   try {
     ensureHost();
-    let url = absUrl(id);
+    const url = absUrl(id);
     const html = httpGet(url, { 'Referer': HOST + '/' });
-    if (isChallenge(html)) {
-      return JSON.stringify({
-        list: [{
-          vod_id: url,
-          vod_name: '详情无法访问',
-          vod_pic: '',
-          vod_content: '',
-          vod_play_from: '默认分组',
-          vod_play_url: '播放$',
-        }],
-      });
-    }
 
     let title = '';
-    let m = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)
-      || html.match(/class="title"[^>]*>([\s\S]*?)</i)
-      || html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-    if (m) title = m[1].replace(/<[^>]+>/g, '').trim().replace(/\s*[|\-].*$/, '');
+    // 避免抓到「目录」菜单
+    let m = html.match(/stui-vodlist__thumb[^>]*title="([^"]+)"/i);
+    if (!m) m = html.match(/<h3[^>]*class="[^"]*title[^"]*"[^>]*>([\s\S]*?)<\/h3>/i);
+    if (!m) m = html.match(/AID\s*=\s*'(\d+)'/);
+    if (m) {
+      title = m[1].replace(/<[^>]+>/g, '').trim();
+      if (title === '目录' || /^\d+$/.test(title)) title = '';
+    }
+    if (!title) {
+      m = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+      if (m) title = m[1].replace(/<[^>]+>/g, '').trim().split(/[|\-]/)[0].trim();
+    }
 
-    // 播放地址在 play 时再解（含 token 时效）
+    // 在详情阶段就尝试解析播放地址（失败则 play 再试）
+    let media = '';
+    try { media = extractPlayUrl(html, url); } catch (e) {}
+
     return JSON.stringify({
       list: [{
         vod_id: url,
@@ -447,7 +400,7 @@ async function detail(id) {
         vod_pic: '',
         vod_content: '',
         vod_play_from: '默认分组',
-        vod_play_url: '播放$' + url,
+        vod_play_url: '播放$' + (media || url),
       }],
     });
   } catch (e) {
@@ -467,26 +420,26 @@ async function detail(id) {
 async function play(flag, id, flags) {
   try {
     ensureHost();
-    let playUrl = (id || '').trim();
+    let key = (id || '').trim();
 
-    // 已是媒体地址
-    if (/\.(m3u8|mp4)(\?|$)/i.test(playUrl) && playUrl.indexOf('http') === 0) {
+    if (/\.(m3u8|mp4)(\?|$)/i.test(key) && key.indexOf('http') === 0) {
       return JSON.stringify({
         parse: 0,
         jx: 0,
-        url: playUrl,
+        url: key,
         header: {
           'User-Agent': UA,
           'Referer': HOST + '/',
+          'Origin': HOST,
         },
       });
     }
 
-    const pageUrl = absUrl(playUrl);
+    const pageUrl = absUrl(key);
     const html = httpGet(pageUrl, { 'Referer': HOST + '/' });
     const media = extractPlayUrl(html, pageUrl);
 
-    if (media) {
+    if (media && /\.(m3u8|mp4)/i.test(media)) {
       return JSON.stringify({
         parse: 0,
         jx: 0,
@@ -494,21 +447,25 @@ async function play(flag, id, flags) {
         header: {
           'User-Agent': UA,
           'Referer': HOST + '/',
+          'Origin': HOST,
         },
       });
     }
 
+    // 解析失败时不要把页面 HTML 地址当媒体源
     return JSON.stringify({
-      parse: 1,
+      parse: 0,
       jx: 0,
-      url: pageUrl,
-      header: { 'User-Agent': UA, 'Referer': HOST + '/' },
+      url: '',
+      message: '播放解析失败，请换节点或稍后重试',
+      header: { 'User-Agent': UA },
     });
   } catch (e) {
     return JSON.stringify({
       parse: 0,
       jx: 0,
-      url: id,
+      url: '',
+      message: String(e),
       header: { 'User-Agent': UA },
     });
   }
@@ -518,15 +475,10 @@ async function search(wd, quick, pg) {
   try {
     ensureHost();
     const page = parseInt(pg) || 1;
-    const text = encodeURIComponent(wd || '');
-    const url = HOST + '/vodsearch/' + text + '----------' + page + '---.html';
+    const url = HOST + '/vodsearch/' + encodeURIComponent(wd || '') + '----------' + page + '---.html';
     const html = httpGet(url);
     if (isChallenge(html)) return JSON.stringify({ list: [tip('搜索无法访问')] });
-    return JSON.stringify({
-      page: page,
-      pagecount: 1,
-      list: parseList(html),
-    });
+    return JSON.stringify({ page: page, pagecount: 1, list: parseList(html) });
   } catch (e) {
     return JSON.stringify({ list: [] });
   }
