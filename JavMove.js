@@ -312,14 +312,54 @@ async function init(cfg) {
   try { httpGet(HOST + '/'); } catch (e) {}
 }
 
+function parseGenres(html) {
+  const list = [];
+  const seen = {};
+  const re = /href="(\/genres\/([A-Za-z0-9_-]+)\/([a-z0-9-]+))"[^>]*>([^<]{1,80})<\/a>/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const path = m[1];
+    const slug = m[3];
+    let name = (m[4] || '').trim();
+    if (!name || seen[path] || path === '/genres') continue;
+    if (/^(genres|more|view|all)$/i.test(name)) continue;
+    seen[path] = 1;
+    list.push({
+      type_id: path.replace(/^\//, ''),
+      type_name: name,
+    });
+  }
+  // 无文字时用 slug
+  if (list.length < 10) {
+    const re2 = /href="(\/genres\/[A-Za-z0-9_-]+\/([a-z0-9-]+))"/gi;
+    while ((m = re2.exec(html)) !== null) {
+      const path = m[1];
+      if (seen[path]) continue;
+      seen[path] = 1;
+      const slug = m[2];
+      list.push({
+        type_id: path.replace(/^\//, ''),
+        type_name: slug.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
+      });
+    }
+  }
+  list.sort((a, b) => a.type_name.localeCompare(b.type_name));
+  return list;
+}
+
 async function home(filter) {
-  return JSON.stringify({
-    class: [
-      { type_id: 'release', type_name: '最新AV' },
-      { type_id: 'upcoming', type_name: '即将上映' },
-    ],
-    filters: {},
-  });
+  const classes = [
+    { type_id: 'release', type_name: '最新AV' },
+    { type_id: 'upcoming', type_name: '即将上映' },
+  ];
+  try {
+    const html = httpGet(HOST + '/genres');
+    if (html && !isChallenge(html)) {
+      const genres = parseGenres(html);
+      for (let i = 0; i < genres.length; i++) classes.push(genres[i]);
+    }
+  } catch (e) {}
+  return JSON.stringify({ class: classes, filters: {} });
 }
 
 async function homeVod() {
@@ -335,7 +375,10 @@ async function homeVod() {
 async function category(tid, pg, filter, extend) {
   try {
     const page = parseInt(pg) || 1;
-    const html = httpGet(HOST + '/' + (tid || 'release') + '?page=' + page);
+    let path = (tid || 'release').replace(/^\//, '');
+    // release / upcoming / genres/xxx/slug
+    const url = HOST + '/' + path + '?page=' + page;
+    const html = httpGet(url);
     if (isChallenge(html)) {
       return JSON.stringify({ page: page, pagecount: 1, limit: 24, total: 0, list: [tip('分类无法访问')] });
     }
