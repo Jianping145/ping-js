@@ -256,20 +256,18 @@ function parseFormats(html) {
  * mp4;{Cookie@...&&User-Agent@...&&Referer@https://javmove.com/&&Accept-Encoding@identity;q=1, *;q=0}
  */
 function buildPlayResult(mediaUrl) {
-  // 去掉可能误拼的内嵌头，只留纯媒体地址
+  // 去掉误拼的内嵌头
   let u = String(mediaUrl || '').trim();
   const cut = u.indexOf(';{');
   if (cut > 0) u = u.slice(0, cut);
-  const ck = ensureCookie();
+  // 续播/Range 请求时 identity + 假 Cookie 容易被 CDN 掐断，只保留浏览器常用头
   const header = {
     'User-Agent': UA,
     'Referer': HOST + '/',
     'Origin': HOST,
     'Accept': '*/*',
-    'Accept-Encoding': 'identity;q=1, *;q=0',
-    'Cookie': ck,
+    'Connection': 'keep-alive',
   };
-  // 蜂蜜影视 / FongMi：纯 URL + header 对象（不要把 Cookie 拼进 url，否则播放器当非法地址）
   return JSON.stringify({
     parse: 0,
     jx: 0,
