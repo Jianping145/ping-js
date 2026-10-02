@@ -174,9 +174,10 @@ function parseList(html) {
             if (pic.indexOf('//') === 0) pic = 'https:' + pic;
             else if (pic.indexOf('http') !== 0) pic = absUrl(pic);
             pic = pic.replace(/&amp;/g, '&');
-            // 图床防盗链：走图片代理，避免蜂蜜影视不带 Referer 导致裂图
+            // 图床防盗链：用 wp.com 图片代理（国内更稳定）
             if (/3010\.top|huaduys|pic\d*\./i.test(pic)) {
-                pic = 'https://images.weserv.nl/?url=' + encodeURIComponent(pic) + '&output=jpg';
+                // https://pic1.3010.top/xxx -> https://i0.wp.com/pic1.3010.top/xxx
+                pic = pic.replace(/^https?:\/\//i, 'https://i0.wp.com/');
             }
         }
 
