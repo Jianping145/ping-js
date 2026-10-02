@@ -117,84 +117,111 @@ function parseList(html) {
     if (!html || html.length < 200) return list;
     const seen = {};
 
-    // 按 li 拆（兼容有无 class）
-    const parts = html.split(/<li(?:\s[^>]*)?>/i);
-    for (let i = 1; i < parts.length; i++) {
-        const chunk = parts[i].substring(0, 2500);
-        // 必须是视频卡片
-        if (chunk.indexOf('stui-vodlist__thumb') < 0 && chunk.indexOf('voddetail') < 0) continue;
+    // 方案A：整页匹配「详情链接 + 附近封面」
+    // 典型结构: href="/voddetail/xx.html" ... data-original="https://pic....jpg"
+    var reA = /href=["']([^"']*voddetail\/[^"']+)["'][^>]*title=["']([^"']*)["'][\s\S]{0,1200}?data-original=["']([^"']+)["']/gi;
+    var m;
+    while ((m = reA.exec(html)) !== null) {
+        var href = absUrl(m[1]);
+        if (seen[href]) continue;
+        var title = cleanText(m[2]);
+        var pic = m[3].replace(/&amp;/g, '&');
+        if (!title || /广告|棋牌|葡京|注册送/.test(title)) continue;
+        if (/load\.gif|loading|placeholder/i.test(pic)) continue;
+        if (pic.indexOf('//') === 0) pic = 'https:' + pic;
+        else if (pic.indexOf('http') !== 0) pic = absUrl(pic);
+        // 防盗链代理
+        if (/3010\.top|pic\d*\./i.test(pic)) {
+            pic = pic.replace(/^https?:\/\//i, 'https://i0.wp.com/');
+        }
+        seen[href] = true;
+        // 备注
+        var tail = html.substring(m.index, m.index + 1500);
+        var remark = '';
+        var rm = tail.match(/pic-tag-t[^>]*>([\s\S]*?)<\//i);
+        if (rm) remark = cleanText(rm[1]);
+        list.push({
+            vod_id: href,
+            vod_name: title,
+            vod_pic: pic,
+            vod_remarks: remark,
+        });
+    }
 
-        // 链接
-        let href = '';
-        const hrefM = chunk.match(/stui-vodlist__thumb[^>]*href=["']([^"']+)["']/i) ||
-            chunk.match(/href=["']([^"']*voddetail[^"']+)["']/i);
+    if (list.length > 0) return list;
+
+    // 方案B：属性顺序 title 在 href 后，或 data-original 在前
+    var reB = /data-original=["']([^"']+)["'][\s\S]{0,800}?href=["']([^"']*voddetail\/[^"']+)["'][^>]*title=["']([^"']*)["']/gi;
+    while ((m = reB.exec(html)) !== null) {
+        var pic = m[1].replace(/&amp;/g, '&');
+        var href = absUrl(m[2]);
+        var title = cleanText(m[3]);
+        if (seen[href] || !title) continue;
+        if (/load\.gif/i.test(pic)) continue;
+        if (pic.indexOf('//') === 0) pic = 'https:' + pic;
+        else if (pic.indexOf('http') !== 0) pic = absUrl(pic);
+        if (/3010\.top|pic\d*\./i.test(pic)) {
+            pic = pic.replace(/^https?:\/\//i, 'https://i0.wp.com/');
+        }
+        seen[href] = true;
+        list.push({
+            vod_id: href,
+            vod_name: title,
+            vod_pic: pic,
+            vod_remarks: '',
+        });
+    }
+
+    if (list.length > 0) return list;
+
+    // 方案C：按 li 块解析（兜底）
+    var parts = html.split(/<li(?:\s[^>]*)?>/i);
+    for (var i = 1; i < parts.length; i++) {
+        var chunk = parts[i].substring(0, 4000);
+        if (chunk.indexOf('voddetail') < 0 && chunk.indexOf('stui-vodlist__thumb') < 0) continue;
+
+        var href = '';
+        var hrefM = chunk.match(/href=["']([^"']*voddetail\/[^"']+)["']/i);
         if (hrefM) href = absUrl(hrefM[1]);
         if (!href || seen[href]) continue;
 
-        // 标题：优先 detail 里的 h4/title 链接文字
-        let title = '';
-        const t1 = chunk.match(/stui-vodlist__detail[\s\S]{0,300}?<h4[^>]*>[\s\S]*?<a[^>]*>([\s\S]*?)<\/a>/i);
-        if (t1) title = cleanText(t1[1]);
+        var title = '';
+        var tM = chunk.match(/\btitle=["']([^"']+)["']/i);
+        if (tM) title = cleanText(tM[1]);
         if (!title) {
-            const t2 = chunk.match(/class=["'][^"']*title[^"']*["'][^>]*>[\s\S]*?<a[^>]*>([\s\S]*?)<\/a>/i);
-            if (t2) title = cleanText(t2[1]);
+            var tM2 = chunk.match(/<h4[^>]*>[\s\S]*?<a[^>]*>([\s\S]*?)<\/a>/i);
+            if (tM2) title = cleanText(tM2[1]);
         }
-        // 其次 thumb 的 title 属性（属性顺序不限）
-        if (!title) {
-            const t3 = chunk.match(/stui-vodlist__thumb[^>]*\btitle=["']([^"']+)["']/i);
-            if (t3) title = cleanText(t3[1]);
-        }
-        // 再试 a 标签上的 title
-        if (!title) {
-            const t4 = chunk.match(/href=["'][^"']*voddetail[^"']+["'][^>]*\btitle=["']([^"']+)["']/i);
-            if (t4) title = cleanText(t4[1]);
-        }
-        if (!title || title.length < 1) continue;
-        // 过滤明显广告
+        if (!title) continue;
         if (/广告|棋牌|葡京|注册送/.test(title)) continue;
 
-        // 封面：优先 data-original，跳过占位图 load.gif
-        let pic = '';
-        var picCands = [];
-        var pm;
-        var pre = /data-original=["']([^"']+)["']/gi;
-        while ((pm = pre.exec(chunk)) !== null) picCands.push(pm[1]);
-        pre = /data-src=["']([^"']+)["']/gi;
-        while ((pm = pre.exec(chunk)) !== null) picCands.push(pm[1]);
-        pre = /(?:src)=["']([^"']+\.(?:jpg|jpeg|png|webp)[^"']*)["']/gi;
-        while ((pm = pre.exec(chunk)) !== null) picCands.push(pm[1]);
-        for (var pi = 0; pi < picCands.length; pi++) {
-            var c = picCands[pi];
-            if (!c) continue;
-            if (/load\.gif|loading|placeholder|data:image/i.test(c)) continue;
-            pic = c;
-            break;
+        var pic = '';
+        var pM = chunk.match(/data-original=["']([^"']+)["']/i) ||
+            chunk.match(/data-src=["']([^"']+)["']/i);
+        if (pM) pic = pM[1].replace(/&amp;/g, '&');
+        if (pic && /load\.gif/i.test(pic)) pic = '';
+        if (!pic) {
+            pM = chunk.match(/https?:\/\/[^"'\s<>]*pic[^"'\s<>]+\.(?:jpg|jpeg|png|webp)/i);
+            if (pM) pic = pM[0];
         }
         if (pic) {
             if (pic.indexOf('//') === 0) pic = 'https:' + pic;
             else if (pic.indexOf('http') !== 0) pic = absUrl(pic);
-            pic = pic.replace(/&amp;/g, '&');
-            // 图床防盗链：用 wp.com 图片代理（国内更稳定）
-            if (/3010\.top|huaduys|pic\d*\./i.test(pic)) {
-                // https://pic1.3010.top/xxx -> https://i0.wp.com/pic1.3010.top/xxx
+            if (/3010\.top|pic\d*\./i.test(pic)) {
                 pic = pic.replace(/^https?:\/\//i, 'https://i0.wp.com/');
             }
         }
 
-        // 备注 / 时长
-        let remark = '';
-        const r1 = chunk.match(/pic-tag-t[^>]*>([\s\S]*?)<\//i);
-        if (r1) remark = cleanText(r1[1]);
-        let duration = '';
-        const d1 = chunk.match(/pic-tag-b[^>]*>([\s\S]*?)<\//i);
-        if (d1) duration = cleanText(d1[1]);
+        var remark = '';
+        var rM = chunk.match(/pic-tag-t[^>]*>([\s\S]*?)<\//i);
+        if (rM) remark = cleanText(rM[1]);
 
         seen[href] = true;
         list.push({
             vod_id: href,
             vod_name: title,
             vod_pic: pic,
-            vod_remarks: remark || duration,
+            vod_remarks: remark,
         });
     }
 
