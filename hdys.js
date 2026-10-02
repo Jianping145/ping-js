@@ -153,14 +153,28 @@ function parseList(html) {
         // 过滤明显广告
         if (/广告|棋牌|葡京|注册送/.test(title)) continue;
 
-        // 封面
+        // 封面：优先 data-original，跳过占位图 load.gif
         let pic = '';
-        const p1 = chunk.match(/data-original=["']([^"']+)["']/i) ||
-            chunk.match(/data-src=["']([^"']+)["']/i) ||
-            chunk.match(/stui-vodlist__thumb[\s\S]{0,200}?src=["']([^"']+\.(?:jpg|jpeg|png|webp)[^"']*)["']/i);
-        if (p1) {
-            pic = p1[1];
-            if (pic.indexOf('http') !== 0) pic = absUrl(pic);
+        var picCands = [];
+        var pm;
+        var pre = /data-original=["']([^"']+)["']/gi;
+        while ((pm = pre.exec(chunk)) !== null) picCands.push(pm[1]);
+        pre = /data-src=["']([^"']+)["']/gi;
+        while ((pm = pre.exec(chunk)) !== null) picCands.push(pm[1]);
+        pre = /(?:src)=["']([^"']+\.(?:jpg|jpeg|png|webp)[^"']*)["']/gi;
+        while ((pm = pre.exec(chunk)) !== null) picCands.push(pm[1]);
+        for (var pi = 0; pi < picCands.length; pi++) {
+            var c = picCands[pi];
+            if (!c) continue;
+            if (/load\.gif|loading|placeholder|data:image/i.test(c)) continue;
+            pic = c;
+            break;
+        }
+        if (pic) {
+            if (pic.indexOf('//') === 0) pic = 'https:' + pic;
+            else if (pic.indexOf('http') !== 0) pic = absUrl(pic);
+            // 部分图床需要去反盗链参数外的干净地址
+            pic = pic.replace(/&amp;/g, '&');
         }
 
         // 备注 / 时长
