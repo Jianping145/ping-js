@@ -173,8 +173,11 @@ function parseList(html) {
         if (pic) {
             if (pic.indexOf('//') === 0) pic = 'https:' + pic;
             else if (pic.indexOf('http') !== 0) pic = absUrl(pic);
-            // 部分图床需要去反盗链参数外的干净地址
             pic = pic.replace(/&amp;/g, '&');
+            // 图床防盗链：走图片代理，避免蜂蜜影视不带 Referer 导致裂图
+            if (/3010\.top|huaduys|pic\d*\./i.test(pic)) {
+                pic = 'https://images.weserv.nl/?url=' + encodeURIComponent(pic) + '&output=jpg';
+            }
         }
 
         // 备注 / 时长
