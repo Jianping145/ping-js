@@ -2,12 +2,13 @@
  * 91JAV - 猫源 JS（参考可用 Python 版改写）
  * 特点：
  * 1) 自动从 GitLab README / 发布页解析最新可用 host
- * 2) 图片走 localProxy 代理并尝试 AES 解密（与 Python 版一致）
+ * 2) 图片走 localProxy 代理 + 纯 JS AES 解密（不依赖 CryptoJS）
  * 3) 列表/详情/搜索/播放逻辑对齐 Python 版
  *
- * 修复：localProxy 二进制处理 + AES 解密更稳健，兼容多种 req 返回格式
+ * 修复：纯 JS AES 解密 + 二进制字符串返回，兼容更多壳
  */
 const HOSTS = [
+    'https://www.91jav1.com',
     'https://cabin.zbywlcc.com',
     'https://born.zbywlcc.com',
     'https://d1nqsse6ono4lc.cloudfront.net',
@@ -61,60 +62,221 @@ function toUint8Array(data) {
         return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
     }
     if (typeof data === 'string') {
-        // 常见：binary string（每个 char 对应一个字节）
         const out = new Uint8Array(data.length);
         for (let i = 0; i < data.length; i++) out[i] = data.charCodeAt(i) & 0xff;
         return out;
     }
-    // 有些环境返回 {content: ...} / {body: ...}
     if (data.content != null) return toUint8Array(data.content);
     if (data.body != null) return toUint8Array(data.body);
     return null;
 }
 
-/** AES-CBC PKCS7 解密，兼容多种输入，输出 Uint8Array */
-function aesDecryptBytes(data) {
+/** Uint8Array -> 二进制字符串（很多壳更认这个） */
+function u8ToBinStr(u8) {
+    let s = '';
+    const len = u8.length;
+    const chunk = 8192;
+    for (let i = 0; i < len; i += chunk) {
+        const end = Math.min(i + chunk, len);
+        s += String.fromCharCode.apply(null, u8.subarray(i, end));
+    }
+    return s;
+}
+
+/* ========== 纯 JS AES-128-CBC 解密（不依赖 CryptoJS） ========== */
+const SBOX = [
+    0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
+    0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
+    0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
+    0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
+    0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
+    0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
+    0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
+    0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
+    0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
+    0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
+    0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
+    0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
+    0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
+    0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
+    0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
+    0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16
+];
+const INV_SBOX = [
+    0x52,0x09,0x6a,0xd5,0x30,0x36,0xa5,0x38,0xbf,0x40,0xa3,0x9e,0x81,0xf3,0xd7,0xfb,
+    0x7c,0xe3,0x39,0x82,0x9b,0x2f,0xff,0x87,0x34,0x8e,0x43,0x44,0xc4,0xde,0xe9,0xcb,
+    0x54,0x7b,0x94,0x32,0xa6,0xc2,0x23,0x3d,0xee,0x4c,0x95,0x0b,0x42,0xfa,0xc3,0x4e,
+    0x08,0x2e,0xa1,0x66,0x28,0xd9,0x24,0xb2,0x76,0x5b,0xa2,0x49,0x6d,0x8b,0xd1,0x25,
+    0x72,0xf8,0xf6,0x64,0x86,0x68,0x98,0x16,0xd4,0xa4,0x5c,0xcc,0x5d,0x65,0xb6,0x92,
+    0x6c,0x70,0x48,0x50,0xfd,0xed,0xb9,0xda,0x5e,0x15,0x46,0x57,0xa7,0x8d,0x9d,0x84,
+    0x90,0xd8,0xab,0x00,0x8c,0xbc,0xd3,0x0a,0xf7,0xe4,0x58,0x05,0xb8,0xb3,0x45,0x06,
+    0xd0,0x2c,0x1e,0x8f,0xca,0x3f,0x0f,0x02,0xc1,0xaf,0xbd,0x03,0x01,0x13,0x8a,0x6b,
+    0x3a,0x91,0x11,0x41,0x4f,0x67,0xdc,0xea,0x97,0xf2,0xcf,0xce,0xf0,0xb4,0xe6,0x73,
+    0x96,0xac,0x74,0x22,0xe7,0xad,0x35,0x85,0xe2,0xf9,0x37,0xe8,0x1c,0x75,0xdf,0x6e,
+    0x47,0xf1,0x1a,0x71,0x1d,0x29,0xc5,0x89,0x6f,0xb7,0x62,0x0e,0xaa,0x18,0xbe,0x1b,
+    0xfc,0x56,0x3e,0x4b,0xc6,0xd2,0x79,0x20,0x9a,0xdb,0xc0,0xfe,0x78,0xcd,0x5a,0xf4,
+    0x1f,0xdd,0xa8,0x33,0x88,0x07,0xc7,0x31,0xb1,0x12,0x10,0x59,0x27,0x80,0xec,0x5f,
+    0x60,0x51,0x7f,0xa9,0x19,0xb5,0x4a,0x0d,0x2d,0xe5,0x7a,0x9f,0x93,0xc9,0x9c,0xef,
+    0xa0,0xe0,0x3b,0x4d,0xae,0x2a,0xf5,0xb0,0xc8,0xeb,0xbb,0x3c,0x83,0x53,0x99,0x61,
+    0x17,0x2b,0x04,0x7e,0xba,0x77,0xd6,0x26,0xe1,0x69,0x14,0x63,0x55,0x21,0x0c,0x7d
+];
+const RCON = [0x00,0x01,0x02,0x04,0x08,0x10,0x20,0x40,0x80,0x1b,0x36];
+
+function aesSubWord(w) {
+    return (SBOX[(w >>> 24) & 0xff] << 24) | (SBOX[(w >>> 16) & 0xff] << 16) | (SBOX[(w >>> 8) & 0xff] << 8) | SBOX[w & 0xff];
+}
+function aesRotWord(w) {
+    return ((w << 8) | (w >>> 24)) >>> 0;
+}
+function aesKeyExpansion(key) {
+    const Nk = 4;
+    const w = new Array(44);
+    for (let i = 0; i < Nk; i++) {
+        w[i] = ((key[4*i] << 24) | (key[4*i+1] << 16) | (key[4*i+2] << 8) | key[4*i+3]) >>> 0;
+    }
+    for (let i = Nk; i < 44; i++) {
+        let temp = w[i-1];
+        if (i % Nk === 0) {
+            temp = (aesSubWord(aesRotWord(temp)) ^ (RCON[i/Nk] << 24)) >>> 0;
+        }
+        w[i] = (w[i-Nk] ^ temp) >>> 0;
+    }
+    return w;
+}
+function aesAddRoundKey(state, w, round) {
+    for (let c = 0; c < 4; c++) {
+        const k = w[round*4 + c];
+        state[c*4]   ^= (k >>> 24) & 0xff;
+        state[c*4+1] ^= (k >>> 16) & 0xff;
+        state[c*4+2] ^= (k >>> 8) & 0xff;
+        state[c*4+3] ^= k & 0xff;
+    }
+}
+function aesInvSubBytes(state) {
+    for (let i = 0; i < 16; i++) state[i] = INV_SBOX[state[i]];
+}
+function aesInvShiftRows(state) {
+    let t;
+    t = state[13]; state[13]=state[9]; state[9]=state[5]; state[5]=state[1]; state[1]=t;
+    t = state[2]; state[2]=state[10]; state[10]=t; t = state[6]; state[6]=state[14]; state[14]=t;
+    t = state[3]; state[3]=state[7]; state[7]=state[11]; state[11]=state[15]; state[15]=t;
+}
+function mul(a, b) {
+    let p = 0;
+    for (let i = 0; i < 8; i++) {
+        if (b & 1) p ^= a;
+        const hi = a & 0x80;
+        a = (a << 1) & 0xff;
+        if (hi) a ^= 0x1b;
+        b >>>= 1;
+    }
+    return p & 0xff;
+}
+function aesInvMixColumns(state) {
+    for (let c = 0; c < 4; c++) {
+        const i = c * 4;
+        const a0 = state[i], a1 = state[i+1], a2 = state[i+2], a3 = state[i+3];
+        state[i]   = mul(a0,0x0e) ^ mul(a1,0x0b) ^ mul(a2,0x0d) ^ mul(a3,0x09);
+        state[i+1] = mul(a0,0x09) ^ mul(a1,0x0e) ^ mul(a2,0x0b) ^ mul(a3,0x0d);
+        state[i+2] = mul(a0,0x0d) ^ mul(a1,0x09) ^ mul(a2,0x0e) ^ mul(a3,0x0b);
+        state[i+3] = mul(a0,0x0b) ^ mul(a1,0x0d) ^ mul(a2,0x09) ^ mul(a3,0x0e);
+    }
+}
+function aesDecryptBlock(input, w) {
+    const state = new Array(16);
+    for (let i = 0; i < 16; i++) state[i] = input[i];
+    aesAddRoundKey(state, w, 10);
+    for (let round = 9; round >= 1; round--) {
+        aesInvShiftRows(state);
+        aesInvSubBytes(state);
+        aesAddRoundKey(state, w, round);
+        aesInvMixColumns(state);
+    }
+    aesInvShiftRows(state);
+    aesInvSubBytes(state);
+    aesAddRoundKey(state, w, 0);
+    return state;
+}
+
+function pureAesDecrypt(cipherBytes, keyStr, ivStr) {
     try {
-        if (typeof CryptoJS === 'undefined' || !CryptoJS.AES) return null;
-        const bytes = toUint8Array(data);
-        if (!bytes || bytes.length < 16) return null;
-
-        // 把 Uint8Array 转成 WordArray（大端）
-        const words = [];
-        for (let i = 0; i < bytes.length; i += 4) {
-            words.push(
-                ((bytes[i] || 0) << 24) |
-                ((bytes[i + 1] || 0) << 16) |
-                ((bytes[i + 2] || 0) << 8) |
-                (bytes[i + 3] || 0)
-            );
+        const key = new Uint8Array(16);
+        const iv = new Uint8Array(16);
+        for (let i = 0; i < 16; i++) {
+            key[i] = keyStr.charCodeAt(i) & 0xff;
+            iv[i] = ivStr.charCodeAt(i) & 0xff;
         }
-        const wordArray = CryptoJS.lib.WordArray.create(words, bytes.length);
-
-        const key = CryptoJS.enc.Utf8.parse(AES_KEY);
-        const iv = CryptoJS.enc.Utf8.parse(AES_IV);
-        const decrypted = CryptoJS.AES.decrypt(
-            { ciphertext: wordArray },
-            key,
-            {
-                iv: iv,
-                mode: CryptoJS.mode.CBC,
-                padding: CryptoJS.pad.Pkcs7,
+        const w = aesKeyExpansion(key);
+        const len = cipherBytes.length;
+        if (len < 16 || len % 16 !== 0) return null;
+        const out = new Uint8Array(len);
+        let prev = iv;
+        for (let offset = 0; offset < len; offset += 16) {
+            const block = cipherBytes.subarray(offset, offset + 16);
+            const dec = aesDecryptBlock(block, w);
+            for (let i = 0; i < 16; i++) {
+                out[offset + i] = dec[i] ^ prev[i];
             }
-        );
-
-        // 从 WordArray 直接提取字节，避免 hex 转换
-        const sigBytes = decrypted.sigBytes;
-        if (sigBytes <= 0) return null;
-        const out = new Uint8Array(sigBytes);
-        const w = decrypted.words;
-        for (let i = 0; i < sigBytes; i++) {
-            out[i] = (w[i >>> 2] >>> (24 - (i % 4) * 8)) & 0xff;
+            prev = block;
         }
-        return out;
+        // PKCS7 unpad
+        const pad = out[len - 1];
+        if (pad < 1 || pad > 16) return out;
+        for (let i = 0; i < pad; i++) {
+            if (out[len - 1 - i] !== pad) return out;
+        }
+        return out.subarray(0, len - pad);
     } catch (e) {
         return null;
     }
+}
+
+/** AES 解密入口：优先纯 JS，有 CryptoJS 时也可用 */
+function aesDecryptBytes(data) {
+    const bytes = toUint8Array(data);
+    if (!bytes || bytes.length < 16) return null;
+
+    // 1. 纯 JS 实现（不依赖任何库）
+    let dec = pureAesDecrypt(bytes, AES_KEY, AES_IV);
+    if (dec && dec.length > 4) {
+        const jpg = dec[0] === 0xff && dec[1] === 0xd8 && dec[2] === 0xff;
+        const png = dec[0] === 0x89 && dec[1] === 0x50 && dec[2] === 0x4e && dec[3] === 0x47;
+        const gif = dec[0] === 0x47 && dec[1] === 0x49 && dec[2] === 0x46;
+        if (jpg || png || gif) return dec;
+    }
+
+    // 2. 兜底：有 CryptoJS 时再试一次
+    try {
+        if (typeof CryptoJS !== 'undefined' && CryptoJS.AES) {
+            const words = [];
+            for (let i = 0; i < bytes.length; i += 4) {
+                words.push(
+                    ((bytes[i] || 0) << 24) |
+                    ((bytes[i + 1] || 0) << 16) |
+                    ((bytes[i + 2] || 0) << 8) |
+                    (bytes[i + 3] || 0)
+                );
+            }
+            const wordArray = CryptoJS.lib.WordArray.create(words, bytes.length);
+            const key = CryptoJS.enc.Utf8.parse(AES_KEY);
+            const iv = CryptoJS.enc.Utf8.parse(AES_IV);
+            const decrypted = CryptoJS.AES.decrypt(
+                { ciphertext: wordArray },
+                key,
+                { iv: iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }
+            );
+            const sigBytes = decrypted.sigBytes;
+            if (sigBytes > 0) {
+                const out = new Uint8Array(sigBytes);
+                const ww = decrypted.words;
+                for (let i = 0; i < sigBytes; i++) {
+                    out[i] = (ww[i >>> 2] >>> (24 - (i % 4) * 8)) & 0xff;
+                }
+                return out;
+            }
+        }
+    } catch (e) {}
+    return null;
 }
 
 function isValidHtml(body) {
@@ -179,7 +341,7 @@ async function resolveReadme() {
                         const urls = body.match(/https?:\/\/[^"'<>\s]+/g) || [];
                         for (let lu of urls) {
                             lu = lu.replace(/['".,;]+$/, '');
-                            if ((lu.indexOf('cloudfront') >= 0 || lu.indexOf('zbywlcc') >= 0 || lu.indexOf('okknubyz') >= 0 || lu.indexOf('gyqspl') >= 0 || lu.indexOf('ehmcfx') >= 0) && HOSTS.indexOf(lu) < 0) HOSTS.push(lu);
+                            if ((lu.indexOf('cloudfront') >= 0 || lu.indexOf('zbywlcc') >= 0 || lu.indexOf('okknubyz') >= 0 || lu.indexOf('gyqspl') >= 0 || lu.indexOf('ehmcfx') >= 0 || lu.indexOf('91jav') >= 0) && HOSTS.indexOf(lu) < 0) HOSTS.push(lu);
                         }
                     } else {
                         const body = await rawRequest(u + '/theme/detail/3/update/');
@@ -236,8 +398,10 @@ function localProxy(param) {
             if (jpg || png || gif) out = dec;
         }
 
-        _imgCache[u] = out;
-        return [200, 'image/jpeg', out, ''];
+        // 返回二进制字符串，兼容性最好
+        const binStr = u8ToBinStr(out);
+        _imgCache[u] = binStr;
+        return [200, 'image/jpeg', binStr, ''];
     } catch (e) {
         return [500, 'text/plain', '', ''];
     }
@@ -490,7 +654,6 @@ function extractM3U8(body) {
 
 async function play(flag, id, flags) {
     let url = String(id || '');
-    let last = '';
     const hd = headers();
     for (const h of HOSTS) {
         try {
