@@ -4,6 +4,8 @@
  * 1) 自动从 GitLab README / 发布页解析最新可用 host
  * 2) 图片走 localProxy 代理并尝试 AES 解密（与 Python 版一致）
  * 3) 列表/详情/搜索/播放逻辑对齐 Python 版
+ *
+ * 修复：localProxy 二进制处理 + AES 解密更稳健，兼容多种 req 返回格式
  */
 const HOSTS = [
     'https://cabin.zbywlcc.com',
@@ -50,25 +52,69 @@ function b64decode(str) {
     return '';
 }
 
+/** 把任意二进制输入统一转成 Uint8Array */
+function toUint8Array(data) {
+    if (!data) return null;
+    if (data instanceof Uint8Array) return data;
+    if (data instanceof ArrayBuffer) return new Uint8Array(data);
+    if (typeof ArrayBuffer !== 'undefined' && ArrayBuffer.isView && ArrayBuffer.isView(data)) {
+        return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    }
+    if (typeof data === 'string') {
+        // 常见：binary string（每个 char 对应一个字节）
+        const out = new Uint8Array(data.length);
+        for (let i = 0; i < data.length; i++) out[i] = data.charCodeAt(i) & 0xff;
+        return out;
+    }
+    // 有些环境返回 {content: ...} / {body: ...}
+    if (data.content != null) return toUint8Array(data.content);
+    if (data.body != null) return toUint8Array(data.body);
+    return null;
+}
+
+/** AES-CBC PKCS7 解密，兼容多种输入，输出 Uint8Array */
 function aesDecryptBytes(data) {
     try {
-        if (typeof CryptoJS !== 'undefined' && CryptoJS.AES) {
-            const key = CryptoJS.enc.Utf8.parse(AES_KEY);
-            const iv = CryptoJS.enc.Utf8.parse(AES_IV);
-            const decrypted = CryptoJS.AES.decrypt({ ciphertext: CryptoJS.lib.WordArray.create(data) }, key, {
+        if (typeof CryptoJS === 'undefined' || !CryptoJS.AES) return null;
+        const bytes = toUint8Array(data);
+        if (!bytes || bytes.length < 16) return null;
+
+        // 把 Uint8Array 转成 WordArray（大端）
+        const words = [];
+        for (let i = 0; i < bytes.length; i += 4) {
+            words.push(
+                ((bytes[i] || 0) << 24) |
+                ((bytes[i + 1] || 0) << 16) |
+                ((bytes[i + 2] || 0) << 8) |
+                (bytes[i + 3] || 0)
+            );
+        }
+        const wordArray = CryptoJS.lib.WordArray.create(words, bytes.length);
+
+        const key = CryptoJS.enc.Utf8.parse(AES_KEY);
+        const iv = CryptoJS.enc.Utf8.parse(AES_IV);
+        const decrypted = CryptoJS.AES.decrypt(
+            { ciphertext: wordArray },
+            key,
+            {
                 iv: iv,
                 mode: CryptoJS.mode.CBC,
                 padding: CryptoJS.pad.Pkcs7,
-            });
-            const arr = CryptoJS.enc.Uint8 ? CryptoJS.enc.Uint8.stringify ? null : null : null;
-            // 兼容写法：转 hex 再转 bytes
-            const hex = decrypted.toString(CryptoJS.enc.Hex);
-            const out = new Uint8Array(hex.length / 2);
-            for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
-            return out;
+            }
+        );
+
+        // 从 WordArray 直接提取字节，避免 hex 转换
+        const sigBytes = decrypted.sigBytes;
+        if (sigBytes <= 0) return null;
+        const out = new Uint8Array(sigBytes);
+        const w = decrypted.words;
+        for (let i = 0; i < sigBytes; i++) {
+            out[i] = (w[i >>> 2] >>> (24 - (i % 4) * 8)) & 0xff;
         }
-    } catch (e) {}
-    return null;
+        return out;
+    } catch (e) {
+        return null;
+    }
 }
 
 function isValidHtml(body) {
@@ -166,18 +212,30 @@ function localProxy(param) {
         const u = b64decode(String(param.url || ''));
         if (!u) return [404, 'text/plain', '', ''];
         if (_imgCache[u]) return [200, 'image/jpeg', _imgCache[u], ''];
-        // JS 环境无法直接 requests，这里依赖 req 抓二进制
-        const res = req(u, { headers: { 'User-Agent': UA, Referer: host + '/' }, binary: true });
-        const data = typeof res === 'string' ? res : res && res.content ? res.content : '';
-        if (!data) return [404, 'text/plain', '', ''];
+
+        const res = req(u, {
+            headers: { 'User-Agent': UA, Referer: host + '/' },
+            binary: true,
+        });
+
+        let raw = null;
+        if (typeof res === 'string') raw = res;
+        else if (res && res.content != null) raw = res.content;
+        else if (res && res.body != null) raw = res.body;
+        else if (res) raw = res;
+
+        const data = toUint8Array(raw);
+        if (!data || data.length === 0) return [404, 'text/plain', '', ''];
+
         let out = data;
         const dec = aesDecryptBytes(data);
         if (dec && dec.length > 4) {
-            const jpg = dec[0] === 0xFF && dec[1] === 0xD8 && dec[2] === 0xFF;
-            const png = dec[0] === 0x89 && dec[1] === 0x50 && dec[2] === 0x4E && dec[3] === 0x47;
+            const jpg = dec[0] === 0xff && dec[1] === 0xd8 && dec[2] === 0xff;
+            const png = dec[0] === 0x89 && dec[1] === 0x50 && dec[2] === 0x4e && dec[3] === 0x47;
             const gif = dec[0] === 0x47 && dec[1] === 0x49 && dec[2] === 0x46;
             if (jpg || png || gif) out = dec;
         }
+
         _imgCache[u] = out;
         return [200, 'image/jpeg', out, ''];
     } catch (e) {
