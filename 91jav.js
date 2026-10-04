@@ -360,20 +360,45 @@ function proxyPic(url) {
     if (!u) return '';
     if (u.indexOf('assets/images/categories') >= 0) return u;
     const b64 = b64encode(u);
+    const q = 'do=js&url=' + encodeURIComponent(b64) + '&type=img';
+    // 1. getProxy / getProxyUrl（部分壳提供）
     try {
-        const proxy = getProxyUrl() + '&url=' + b64 + '&type=img';
-        if (proxy && proxy.indexOf('http') === 0) return proxy;
+        if (typeof getProxy === 'function') {
+            const p = getProxy(true);
+            if (p) return p + (p.indexOf('?') >= 0 ? '&' : '?') + q;
+        }
     } catch (e) {}
-    return 'localProxy?type=img&url=' + b64;
+    try {
+        if (typeof getProxyUrl === 'function') {
+            const p = getProxyUrl();
+            if (p) return p + (p.indexOf('?') >= 0 ? '&' : '?') + q;
+        }
+    } catch (e) {}
+    // 2. js2Proxy（FreeBox 等）
+    try {
+        if (typeof js2Proxy === 'function') {
+            return js2Proxy(true, 3, '91jav', u, { 'User-Agent': UA, Referer: host + '/' });
+        }
+    } catch (e) {}
+    // 3. 硬编码常见本地代理端口（与 Python 版同源写法一致）
+    //    9978 是 FongMi/TVBox 默认端口
+    return 'http://127.0.0.1:9978/proxy?' + q;
 }
 
 function localProxy(param) {
-    const type = (param && param.type) || '';
-    if (type !== 'img') return [404, 'text/plain', '', ''];
+    // param 可能是 {type, url} 或 query map
+    const type = (param && (param.type || param['type'])) || '';
+    if (type !== 'img') return [404, 'text/plain', ''];
     try {
-        const u = b64decode(String(param.url || ''));
-        if (!u) return [404, 'text/plain', '', ''];
-        if (_imgCache[u]) return [200, 'image/jpeg', _imgCache[u], ''];
+        let rawUrl = String((param && (param.url || param['url'])) || '');
+        // 有的壳会 encode 两次，尝试 decode
+        let u = '';
+        try { u = b64decode(decodeURIComponent(rawUrl)); } catch (e) { u = b64decode(rawUrl); }
+        if (!u) {
+            try { u = decodeURIComponent(rawUrl); } catch (e2) { u = rawUrl; }
+        }
+        if (!u || u.indexOf('http') !== 0) return [404, 'text/plain', ''];
+        if (_imgCache[u]) return [200, 'image/jpeg', _imgCache[u]];
 
         const res = req(u, {
             headers: { 'User-Agent': UA, Referer: host + '/' },
@@ -387,7 +412,7 @@ function localProxy(param) {
         else if (res) raw = res;
 
         const data = toUint8Array(raw);
-        if (!data || data.length === 0) return [404, 'text/plain', '', ''];
+        if (!data || data.length === 0) return [404, 'text/plain', ''];
 
         let out = data;
         const dec = aesDecryptBytes(data);
@@ -398,12 +423,13 @@ function localProxy(param) {
             if (jpg || png || gif) out = dec;
         }
 
-        // 返回二进制字符串，兼容性最好
+        // 二进制字符串（QuickJS 最稳）
         const binStr = u8ToBinStr(out);
         _imgCache[u] = binStr;
-        return [200, 'image/jpeg', binStr, ''];
+        // FongMi/QuickJS: [status, mime, body]  或  [status, mime, body, headers, 1] 表示 base64
+        return [200, 'image/jpeg', binStr];
     } catch (e) {
-        return [500, 'text/plain', '', ''];
+        return [500, 'text/plain', ''];
     }
 }
 
@@ -698,5 +724,6 @@ export function __jsEvalReturn() {
         play: play,
         search: search,
         localProxy: localProxy,
+        proxy: localProxy, // 部分壳调用 proxy 而不是 localProxy
     };
 }
