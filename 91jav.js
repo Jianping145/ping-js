@@ -493,8 +493,11 @@ function parseActress(html) {
         const seg = m[3] || '';
         const nm = seg.match(/alt="([^"]*)"/);
         const name = nm ? nm[1] : '女优' + aid;
-        const pm = seg.match(/z-image-loader-url="([^"]*)"/);
-        const pic = pm ? proxyPic(pm[1]) : '';
+        // 女优页图片常写成 z-image-loader-url="`https://...`"，需去掉反引号
+        let picUrl = '';
+        const pm = seg.match(/z-image-loader-url="([^"]*)"/) || seg.match(/(?:data-src|src)="([^"]*)"/);
+        if (pm) picUrl = pm[1].replace(/[`'\s]/g, '').trim();
+        const pic = picUrl ? proxyPic(picUrl) : '';
         const cm = seg.match(/<span>(\d+)\s*部影片<\/span>/);
         const remarks = cm ? cm[1] + ' 部影片' : '';
         out.push({ vod_id: 'actress$' + aid, vod_name: name, vod_pic: pic, vod_remarks: remarks, vod_tag: 'folder' });
