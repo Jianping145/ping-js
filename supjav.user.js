@@ -1,10 +1,14 @@
 // ==UserScript==
 // @name         Supjav
 // @namespace    gmspider
-// @version      2026.10.16.4
-// @description  Supjav GMSpider (保留原CF + 按线路名点击 + 避开预览流)
+// @version      2026.10.16.5
+// @description  Supjav GMSpider (CF原逻辑 + 按名点击 + ST/VOE data-link跳转)
 // @author       Luomo (refactored by Minis, fixed by Kimi)
 // @match        https://supjav.com/*
+// @match        https://*.supremejav.com/*
+// @match        https://streamtape.com/*
+// @match        https://*.voe.sx/*
+// @match        https://*.voe-network.net/*
 // @require      https://cdn.jsdelivr.net/npm/jquery@3.7.1/dist/jquery.slim.min.js
 // @grant        GM_cookie
 // @grant        unsafeWindow
@@ -22,7 +26,6 @@ console.log(JSON.stringify(GM_info));
     }
     Object.freeze(GMSpiderArgs);
 
-    // ---------------- cf_clearance 处理 ----------------
     let cf_clearance = null;
 
     function initCfClearance() {
@@ -53,54 +56,33 @@ console.log(JSON.stringify(GM_info));
         return url;
     }
 
-    // ---------------- Cloudflare 检测（与能过验证的旧版一致） ----------------
     function detectCloudflare() {
         const cfSelectors = [
-            ".loading-verifying",
-            "#challenge-form",
-            ".cf-browser-verification",
-            "#cf-please-wait",
-            ".cf-challenge-running",
-            "[data-translate='checking_browser']",
-            ".cf-wrapper",
-            "#challenge-error-title",
-            ".cf-challenge-body",
-            "#cf-challenge-running"
+            ".loading-verifying", "#challenge-form", ".cf-browser-verification",
+            "#cf-please-wait", ".cf-challenge-running", "[data-translate='checking_browser']",
+            ".cf-wrapper", "#challenge-error-title", ".cf-challenge-body", "#cf-challenge-running"
         ];
         const hasCF = cfSelectors.some(s => $(s).length > 0);
-
         const title = document.title.toLowerCase();
-        const isCFTitle = title.includes("cloudflare") ||
-            title.includes("checking") ||
-            title.includes("verify") ||
-            title.includes("attention required") ||
-            title.includes("please wait") ||
-            title.includes("just a moment");
-
+        const isCFTitle = title.includes("cloudflare") || title.includes("checking") ||
+            title.includes("verify") || title.includes("attention required") ||
+            title.includes("please wait") || title.includes("just a moment");
         const bodyText = document.body?.innerText?.trim() || "";
         const isEmptyBody = bodyText.length < 200;
-
         const hasContent = $(".post, .video-item, .card-video, .thumbnail").length > 0;
-
         return (hasCF || isCFTitle || (isEmptyBody && !hasContent)) && !hasContent;
     }
 
-    // ---------------- 播放辅助 ----------------
     function getServerButtons() {
         let $btns = $(".video-wrap .cd-server:first a.btn-server, .video-wrap .cd-server:first .btn-server");
-        if ($btns.length === 0) {
-            $btns = $(".video-wrap a.btn-server, .video-wrap .btn-server");
-        }
-        if ($btns.length === 0) {
-            $btns = $("a.btn-server, .btn-server, .server-btn");
-        }
+        if ($btns.length === 0) $btns = $(".video-wrap a.btn-server, .video-wrap .btn-server");
+        if ($btns.length === 0) $btns = $("a.btn-server, .btn-server, .server-btn");
         return $btns;
     }
 
     function clickServerButton(btn) {
         if (!btn) return false;
         try {
-            // 清广告/遮罩，减少干扰
             $(".movv-ad, .play-ad, #lcb, .adsbox, .ad-overlay").remove();
             if (typeof btn.scrollIntoView === "function") {
                 try { btn.scrollIntoView({block: "center", inline: "nearest"}); } catch (e) {}
@@ -117,30 +99,52 @@ console.log(JSON.stringify(GM_info));
         }
     }
 
-    // 按线路名（flag）优先匹配按钮，避免点到预览/错线
     function findTargetButton(flag, serverIdx) {
-        const $btns = getServerButtons();
-        const list = $btns.toArray();
+        const list = getServerButtons().toArray();
         if (list.length === 0) return null;
-
         const name = (flag || "").toString().trim().toUpperCase();
         if (name) {
-            // 精确或包含匹配：EVS / VAS / ST / VOE / LUC 等
             for (let i = 0; i < list.length; i++) {
                 const t = (list[i].textContent || list[i].innerText || "").trim().toUpperCase();
                 if (t === name || t.indexOf(name) !== -1 || name.indexOf(t) !== -1) {
-                    console.log("playerContent: matched by name", name, "->", t, "index", i);
+                    console.log("matched by name", name, "->", t);
                     return list[i];
                 }
             }
         }
-
         const idx = Math.min(Math.max(0, serverIdx | 0), list.length - 1);
-        console.log("playerContent: fallback index", idx, "of", list.length);
         return list[idx];
     }
 
-    // ---------------- 通用列表解析 ----------------
+    // ST / VOE：data-link 反转后走 supremejav 跳转（与 CloudStream 同逻辑）
+    function tryDataLinkJump(btn, flag) {
+        if (!btn) return false;
+        const name = (flag || (btn.textContent || "")).toString().trim().toUpperCase();
+        // EVS/VAS/LUC 站内嗅探更稳，不强制跳转
+        if (name.indexOf("EVS") !== -1 || name.indexOf("VAS") !== -1 || name.indexOf("LUC") !== -1) {
+            return false;
+        }
+        let dataLink = btn.getAttribute("data-link") || btn.dataset?.link || "";
+        if (!dataLink) {
+            const $a = $(btn).closest("a");
+            if ($a.length) dataLink = $a.attr("data-link") || "";
+        }
+        if (!dataLink) {
+            console.log("no data-link on button", name);
+            return false;
+        }
+        const reversed = dataLink.split("").reverse().join("");
+        const jumpUrl = "https://lk1.supremejav.com/supjav.php?c=" + encodeURIComponent(reversed);
+        console.log("ST/VOE data-link jump:", jumpUrl);
+        try {
+            window.location.href = jumpUrl;
+            return true;
+        } catch (e) {
+            console.warn("jump failed", e);
+            return false;
+        }
+    }
+
     function parseItems($boxes) {
         const list = [];
         $boxes.each(function () {
@@ -168,7 +172,6 @@ console.log(JSON.stringify(GM_info));
         return isNaN(n) ? 1 : n;
     }
 
-    // ---------------- Spider ----------------
     const GmSpider = {
         homeContent: function (filter) {
             const defaultFilter = [{
@@ -208,7 +211,6 @@ console.log(JSON.stringify(GM_info));
 
         categoryContent: function (tid, pg, filter, extend) {
             const result = {list: [], pagecount: 1};
-
             if (tid === "tag") {
                 $(".categorys .child, .tag-item, .category-item").each(function () {
                     const $a = $(this).find("a").first();
@@ -236,10 +238,7 @@ console.log(JSON.stringify(GM_info));
 
         detailContent: function (ids) {
             const slug = ids[0];
-
-            try {
-                $("#vserver, .video-server, .server-list").click();
-            } catch (e) {}
+            try { $("#vserver, .video-server, .server-list").click(); } catch (e) {}
 
             const vodActor = [], tags = [];
             $(".post-meta .cats a, .meta .cats a, .actress a").each(function () {
@@ -267,8 +266,7 @@ console.log(JSON.stringify(GM_info));
             }
 
             const vodPlayData = [];
-            const btnServers = getServerButtons();
-            btnServers.each(function (i) {
+            getServerButtons().each(function (i) {
                 const from = ($(this).text() || "").trim() || `线路${i + 1}`;
                 vodPlayData.push({
                     from: from,
@@ -293,31 +291,38 @@ console.log(JSON.stringify(GM_info));
             };
         },
 
-        // ★ 按线路名点击 + 多次点击，避开第一次预览流
         playerContent: function (flag, id, vipFlags) {
             const hashRaw = (window.location.hash || "").replace(/^#/, "");
             const idx = parseInt(hashRaw, 10);
             const serverIdx = isNaN(idx) ? 0 : idx;
-            console.log("playerContent: flag =", flag, "index =", serverIdx);
+            console.log("playerContent: flag=", flag, "index=", serverIdx, "host=", location.hostname);
 
-            function doClicks(left) {
+            // 已跳到外链页（streamtape / voe / supremejav）时直接嗅探
+            const host = (location.hostname || "").toLowerCase();
+            if (host.indexOf("streamtape") !== -1 || host.indexOf("voe") !== -1 ||
+                host.indexOf("supremejav") !== -1 || host.indexOf("turboviplay") !== -1) {
+                console.log("on embed host, match only");
+                return {type: "match"};
+            }
+
+            function doPlay(left) {
                 const target = findTargetButton(flag, serverIdx);
-                if (target) {
-                    clickServerButton(target);
-                    // 再点一次，把预览换成正片（你遇到的「第二次才对」）
-                    setTimeout(function () {
-                        clickServerButton(target);
-                    }, 600);
-                    setTimeout(function () {
-                        clickServerButton(target);
-                    }, 1500);
+                if (!target) {
+                    if (left > 0) setTimeout(function () { doPlay(left - 1); }, 400);
                     return;
                 }
-                if (left > 0) {
-                    setTimeout(function () { doClicks(left - 1); }, 400);
+                const name = (flag || (target.textContent || "")).toString().trim().toUpperCase();
+                // ST / VOE：优先 data-link 跳转
+                if (name.indexOf("ST") !== -1 || name.indexOf("VOE") !== -1 ||
+                    name.indexOf("STREAM") !== -1 || name.indexOf("TAPE") !== -1) {
+                    if (tryDataLinkJump(target, flag)) return;
                 }
+                // 其它线路：站内点击（连点避开预览）
+                clickServerButton(target);
+                setTimeout(function () { clickServerButton(target); }, 600);
+                setTimeout(function () { clickServerButton(target); }, 1500);
             }
-            doClicks(20);
+            doPlay(20);
             return {type: "match"};
         },
 
@@ -329,35 +334,25 @@ console.log(JSON.stringify(GM_info));
         }
     };
 
-    // ---------------- 启动逻辑（CF 与旧版一致；player 不 HideWebview） ----------------
     let spiderExecuted = false;
     let checkInterval = null;
 
     function executeSpider() {
         if (spiderExecuted) return;
         spiderExecuted = true;
-
         if (checkInterval) {
             clearInterval(checkInterval);
             checkInterval = null;
         }
-
         console.log("执行 Spider:", GMSpiderArgs.fName);
         const result = GmSpider[GMSpiderArgs.fName](...GMSpiderArgs.fArgs);
         console.log("Spider 结果:", result);
 
         if ((!result.list || result.list.length === 0) && GMSpiderArgs.fName !== "playerContent") {
-            console.warn("解析结果为空！可能原因：");
-            console.warn("1. Cloudflare 验证未通过");
-            console.warn("2. 网站结构改版，选择器失效");
-            console.warn("3. 页面未完全加载");
-            console.warn("当前页面标题:", document.title);
-            console.warn("当前页面 URL:", location.href);
-            console.warn("页面 body 长度:", document.body?.innerHTML?.length);
+            console.warn("解析结果为空", document.title, location.href);
         }
 
         if (typeof GmSpiderInject !== 'undefined') {
-            // 播放时不要立刻隐藏，否则容易只嗅到预览
             if (GMSpiderArgs.fName !== "playerContent" && typeof GmSpiderInject.HideWebview === 'function') {
                 GmSpiderInject.HideWebview();
             }
@@ -366,60 +361,42 @@ console.log(JSON.stringify(GM_info));
     }
 
     function startCloudflareWatch() {
-        console.log("检测到 Cloudflare 验证页面，启动监控...");
-
-        if (typeof GmSpiderInject !== 'undefined') {
-            GmSpiderInject.ShowWebview();
-        }
-
+        console.log("检测到 Cloudflare，监控中...");
+        if (typeof GmSpiderInject !== 'undefined') GmSpiderInject.ShowWebview();
         checkInterval = setInterval(function () {
             const hasContent = $(".post, .video-item, .card-video, .thumbnail").length > 0;
-            const isCF = detectCloudflare();
-
-            if (hasContent && !isCF) {
-                console.log("Cloudflare 验证完成，内容已加载");
+            if (hasContent && !detectCloudflare()) {
+                console.log("CF 完成");
                 executeSpider();
             }
         }, 1000);
-
         setTimeout(function () {
             if (checkInterval) {
                 clearInterval(checkInterval);
                 checkInterval = null;
-                console.warn("Cloudflare 验证超时");
+                console.warn("CF 超时");
                 executeSpider();
             }
         }, 45000);
     }
 
     $(document).ready(function () {
-        console.log("Document ready, 检测 Cloudflare...");
         setTimeout(function () {
-            if (detectCloudflare()) {
-                startCloudflareWatch();
-            }
+            if (detectCloudflare()) startCloudflareWatch();
         }, 500);
     });
 
     $(unsafeWindow).on("load", function () {
-        console.log("Window load 事件触发");
         setTimeout(function () {
-            if (detectCloudflare()) {
-                startCloudflareWatch();
-            } else {
-                executeSpider();
-            }
+            if (detectCloudflare()) startCloudflareWatch();
+            else executeSpider();
         }, 1500);
     });
 
     setTimeout(function () {
         if (!spiderExecuted) {
-            console.warn("8 秒超时，强制检查...");
-            if (detectCloudflare()) {
-                startCloudflareWatch();
-            } else {
-                executeSpider();
-            }
+            if (detectCloudflare()) startCloudflareWatch();
+            else executeSpider();
         }
     }, 8000);
 })();
