@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Supjav
 // @namespace    gmspider
-// @version      2026.09.17
-// @description  Supjav GMSpider (修复版: 增强 Cloudflare 检测 + 空结果处理)
+// @version      2026.10.16.2
+// @description  Supjav GMSpider (播放修复: 不提前隐藏WebView + 可靠点击 + CF检测)
 // @author       Luomo (refactored by Minis, fixed by Kimi)
 // @match        https://supjav.com/*
 // @require      https://cdn.jsdelivr.net/npm/jquery@3.7.1/dist/jquery.slim.min.js
@@ -55,7 +55,6 @@ console.log(JSON.stringify(GM_info));
 
     // ---------------- Cloudflare 检测 ----------------
     function detectCloudflare() {
-        // 检测多种 Cloudflare 验证页面特征
         const cfSelectors = [
             ".loading-verifying",
             "#challenge-form",
@@ -66,27 +65,65 @@ console.log(JSON.stringify(GM_info));
             ".cf-wrapper",
             "#challenge-error-title",
             ".cf-challenge-body",
-            "#cf-challenge-running"
+            "#cf-challenge-running",
+            "#cf-turnstile",
+            ".cf-turnstile",
+            "input[name='cf-turnstile-response']"
         ];
         const hasCF = cfSelectors.some(s => $(s).length > 0);
 
-        // 检测页面标题是否包含 Cloudflare 特征
         const title = document.title.toLowerCase();
-        const isCFTitle = title.includes("cloudflare") || 
-                          title.includes("checking") || 
-                          title.includes("verify") ||
-                          title.includes("attention required") ||
-                          title.includes("please wait") ||
-                          title.includes("just a moment");
+        const isCFTitle = title.includes("cloudflare") ||
+            title.includes("checking") ||
+            title.includes("verify") ||
+            title.includes("attention required") ||
+            title.includes("please wait") ||
+            title.includes("just a moment") ||
+            title.includes("security verification") ||
+            title.includes("performing security");
 
-        // 检测 body 内容是否很少（验证页面通常内容很少）
         const bodyText = document.body?.innerText?.trim() || "";
-        const isEmptyBody = bodyText.length < 200;
+        const isEmptyBody = bodyText.length < 300;
+        const hasVerifyHuman = /verify you are human|security verification|checking your browser/i.test(bodyText);
 
-        // 检测是否有实际内容
-        const hasContent = $(".post, .video-item, .card-video, .thumbnail").length > 0;
+        const hasContent = $(".post, .video-item, .card-video, .thumbnail, a.btn-server, .btn-server").length > 0;
 
-        return (hasCF || isCFTitle || (isEmptyBody && !hasContent)) && !hasContent;
+        return (hasCF || isCFTitle || hasVerifyHuman || (isEmptyBody && !hasContent)) && !hasContent;
+    }
+
+    // 获取所有可用的播放服务器按钮（兼容多 CD 分组）
+    function getServerButtons() {
+        let $btns = $(".video-wrap .cd-server:first a.btn-server, .video-wrap .cd-server:first .btn-server");
+        if ($btns.length === 0) {
+            $btns = $(".video-wrap a.btn-server, .video-wrap .btn-server, .server-list a.btn-server");
+        }
+        if ($btns.length === 0) {
+            $btns = $("a.btn-server, .btn-server, .server-btn");
+        }
+        return $btns;
+    }
+
+    // 更可靠地点击服务器按钮
+    function clickServerButton(btn) {
+        if (!btn) return false;
+        try {
+            // 先移除可能挡住点击的遮罩
+            $(".movv-ad, .play-ad, #lcb, [class*='root--'], [class*='bottomRight']").remove();
+
+            if (typeof btn.click === "function") {
+                btn.click();
+            }
+            const opts = {bubbles: true, cancelable: true, view: window, buttons: 1};
+            btn.dispatchEvent(new MouseEvent("pointerdown", opts));
+            btn.dispatchEvent(new MouseEvent("mousedown", opts));
+            btn.dispatchEvent(new MouseEvent("pointerup", opts));
+            btn.dispatchEvent(new MouseEvent("mouseup", opts));
+            btn.dispatchEvent(new MouseEvent("click", opts));
+            return true;
+        } catch (e) {
+            console.warn("clickServerButton failed:", e);
+            return false;
+        }
     }
 
     // ---------------- 通用列表解析 ----------------
@@ -137,11 +174,15 @@ console.log(JSON.stringify(GM_info));
                     {type_id: "category/english-subtitles", type_name: "英文字幕"},
                     {type_id: "tag", type_name: "类别"},
                 ],
-                filters: {popular: [{key: "sort", name: "时间", value: [
-                    {n: "本月热门", v: "month"},
-                    {n: "本周热门", v: "week"},
-                    {n: "今日热门", v: ""}
-                ]}]},
+                filters: {
+                    popular: [{
+                        key: "sort", name: "时间", value: [
+                            {n: "本月热门", v: "month"},
+                            {n: "本周热门", v: "week"},
+                            {n: "今日热门", v: ""}
+                        ]
+                    }]
+                },
                 list: []
             };
             result.class.forEach(item => {
@@ -155,7 +196,6 @@ console.log(JSON.stringify(GM_info));
             const result = {list: [], pagecount: 1};
 
             if (tid === "tag") {
-                // 标签目录
                 $(".categorys .child, .tag-item, .category-item").each(function () {
                     const $a = $(this).find("a").first();
                     const href = $a.attr("href");
@@ -174,7 +214,6 @@ console.log(JSON.stringify(GM_info));
                 });
                 result.pagecount = getPageCount();
             } else {
-                // 视频列表
                 result.list = parseItems($(".post, .video-item, .card-video, .thumbnail"));
                 result.pagecount = getPageCount();
             }
@@ -184,46 +223,46 @@ console.log(JSON.stringify(GM_info));
         detailContent: function (ids) {
             const slug = ids[0];
 
-            // 尝试点击播放服务器按钮
             try {
                 $("#vserver, .video-server, .server-list").click();
             } catch (e) {}
 
             const vodActor = [], tags = [];
-            // 女优/分类
+            const stripLang = (path) => path.replace(/^\/(zh|ja|en|zh-tw|zh-cn)\//, "/").replace(/^\//, "");
+
             $(".post-meta .cats a, .meta .cats a, .actress a").each(function () {
                 const $a = $(this);
                 const href = $a.attr("href");
                 if (!href) return;
-                const id = new URL(href, location.origin).pathname.replace("/zh/", "");
+                const id = stripLang(new URL(href, location.origin).pathname);
                 const name = $a.text().trim();
                 vodActor.unshift(`[a=cr:{"id":"${id}","name":"${name}"}/]${name}[/a]`);
             });
-            // 标签
             $(".post-meta .tags a, .meta .tags a, .tag a").each(function () {
                 const $a = $(this);
                 const href = $a.attr("href");
                 if (!href) return;
-                const id = new URL(href, location.origin).pathname.replace("/zh/", "");
+                const id = stripLang(new URL(href, location.origin).pathname);
                 const name = $a.text().trim();
                 tags.push(`[a=cr:{"id":"${id}","name":"${name}"}/]#${name}[/a]`);
             });
 
-            // 视频标题清洗
-            let vodContent = $(".post-meta .img, .video-info img, .poster").attr("alt") || "";
+            let vodContent = $(".post-meta .img, .video-info img, .poster").attr("alt") ||
+                $("h1").first().text().trim() || "";
             let vodName = vodContent.replace("[无码破解]", "").trim();
             let match = vodName.match(/^[\w|-]+/);
             if (match) {
                 vodName = match[0].includes("-") ? match[0] : vodContent.match(/^[\w]+\s[\w]+/)?.[0]?.replace(" ", "-") || vodName;
             }
 
-            // 播放源
+            // 播放源：link 只用数字索引，兼容 loadUrl 的 #${link}
             const vodPlayData = [];
-            const btnServers = $(".video-wrap .cd-server:first .btn-server, .video-wrap .btn-server, .server-btn").length > 0
-                ? $(".video-wrap .cd-server:first .btn-server, .video-wrap .btn-server, .server-btn")
-                : $(".btn-server");
+            const btnServers = getServerButtons();
+            if (btnServers.length === 0) {
+                console.warn("detailContent: 未找到任何 .btn-server 按钮");
+            }
             btnServers.each(function (i) {
-                const from = $(this).text().trim() || `线路${i + 1}`;
+                const from = ($(this).text() || "").trim() || `线路${i + 1}`;
                 vodPlayData.push({
                     from: from,
                     media: [{
@@ -234,11 +273,15 @@ console.log(JSON.stringify(GM_info));
                 });
             });
 
+            const picSrc = $(".post-meta .img, .video-info img, .poster, .img img").first().attr("src") ||
+                $(".post-meta .img, .video-info img, .poster").attr("data-src") ||
+                $(".post-meta .img, .video-info img, .poster").attr("data-original");
+
             return {
                 list: [{
                     vod_id: slug,
                     vod_name: vodName,
-                    vod_pic: formatImgUrl($(".post-meta .img, .video-info img, .poster").attr("src")),
+                    vod_pic: formatImgUrl(picSrc),
                     vod_actor: vodActor.join(" "),
                     vod_remarks: tags.join(" "),
                     vod_content: vodContent,
@@ -248,15 +291,50 @@ console.log(JSON.stringify(GM_info));
         },
 
         playerContent: function (flag, id, vipFlags) {
-            const link = window.location.hash.split("#").at(1);
-            const btns = document.querySelectorAll(".video-wrap .btn-server, .server-btn");
-            if (btns[link]) btns[link].dispatchEvent(new Event("click"));
+            // hash 格式: #0 / #1 / ... 对应服务器索引（保持纯数字）
+            const hashRaw = (window.location.hash || "").replace(/^#/, "");
+            const idx = parseInt(hashRaw, 10);
+            const serverIdx = isNaN(idx) ? 0 : idx;
+
+            console.log("playerContent: 目标服务器索引 =", serverIdx);
+
+            function doClick(attemptsLeft) {
+                const btns = getServerButtons().toArray();
+                console.log("playerContent: 按钮数=", btns.length, "剩余尝试=", attemptsLeft);
+
+                if (btns.length > 0) {
+                    const target = btns[Math.min(serverIdx, btns.length - 1)];
+                    console.log("playerContent: 点击按钮 =", (target.textContent || "").trim());
+                    clickServerButton(target);
+
+                    // 0.8s 后再点一次，确保 iframe 加载
+                    setTimeout(function () {
+                        const hasIframe = document.querySelector(
+                            "iframe#video, iframe[allowfullscreen], .video-player iframe, #player iframe, .video-wrap iframe"
+                        );
+                        if (!hasIframe) {
+                            console.log("playerContent: 无 iframe，二次点击");
+                            clickServerButton(target);
+                        }
+                    }, 800);
+                    return;
+                }
+
+                if (attemptsLeft > 0) {
+                    setTimeout(function () { doClick(attemptsLeft - 1); }, 400);
+                } else {
+                    console.warn("playerContent: 超时仍无服务器按钮");
+                }
+            }
+
+            doClick(20); // 最多约 8 秒
+
+            // type:match 时宿主会继续嗅探，不要立刻 HideWebview
             return {type: "match"};
         },
 
         searchContent: function (key, quick, pg) {
             const result = {list: [], pagecount: 1};
-            // 搜索页结构同列表
             result.list = parseItems($(".post, .video-item, .card-video, .thumbnail"));
             result.pagecount = getPageCount();
             return result;
@@ -280,8 +358,7 @@ console.log(JSON.stringify(GM_info));
         const result = GmSpider[GMSpiderArgs.fName](...GMSpiderArgs.fArgs);
         console.log("Spider 结果:", result);
 
-        // 如果结果为空，输出警告
-        if (!result.list || result.list.length === 0) {
+        if ((!result.list || result.list.length === 0) && GMSpiderArgs.fName !== "playerContent") {
             console.warn("解析结果为空！可能原因：");
             console.warn("1. Cloudflare 验证未通过");
             console.warn("2. 网站结构改版，选择器失效");
@@ -292,7 +369,11 @@ console.log(JSON.stringify(GM_info));
         }
 
         if (typeof GmSpiderInject !== 'undefined') {
-            if (typeof GmSpiderInject.HideWebview === 'function') GmSpiderInject.HideWebview();
+            // 播放嗅探阶段不要隐藏 WebView，否则 iframe/m3u8 来不及加载
+            const isPlayer = GMSpiderArgs.fName === "playerContent";
+            if (!isPlayer && typeof GmSpiderInject.HideWebview === 'function') {
+                GmSpiderInject.HideWebview();
+            }
             GmSpiderInject.SetSpiderResult(JSON.stringify(result));
         }
     }
@@ -300,14 +381,12 @@ console.log(JSON.stringify(GM_info));
     function startCloudflareWatch() {
         console.log("检测到 Cloudflare 验证页面，启动监控...");
 
-        // 显示 WebView 让用户可以看到验证过程
         if (typeof GmSpiderInject !== 'undefined') {
             GmSpiderInject.ShowWebview();
         }
 
-        // 轮询检查验证是否完成
-        checkInterval = setInterval(function() {
-            const hasContent = $(".post, .video-item, .card-video, .thumbnail").length > 0;
+        checkInterval = setInterval(function () {
+            const hasContent = $(".post, .video-item, .card-video, .thumbnail, a.btn-server").length > 0;
             const isCF = detectCloudflare();
 
             if (hasContent && !isCF) {
@@ -316,13 +395,11 @@ console.log(JSON.stringify(GM_info));
             }
         }, 1000);
 
-        // 45 秒后超时
-        setTimeout(function() {
+        setTimeout(function () {
             if (checkInterval) {
                 clearInterval(checkInterval);
                 checkInterval = null;
                 console.warn("Cloudflare 验证超时");
-                // 超时后也尝试执行一次
                 executeSpider();
             }
         }, 45000);
@@ -330,9 +407,7 @@ console.log(JSON.stringify(GM_info));
 
     $(document).ready(function () {
         console.log("Document ready, 检测 Cloudflare...");
-
-        // 延迟检测，确保 DOM 稳定
-        setTimeout(function() {
+        setTimeout(function () {
             if (detectCloudflare()) {
                 startCloudflareWatch();
             }
@@ -341,9 +416,7 @@ console.log(JSON.stringify(GM_info));
 
     $(unsafeWindow).on("load", function () {
         console.log("Window load 事件触发");
-
-        // 延迟执行，确保动态内容加载
-        setTimeout(function() {
+        setTimeout(function () {
             if (detectCloudflare()) {
                 startCloudflareWatch();
             } else {
@@ -352,8 +425,7 @@ console.log(JSON.stringify(GM_info));
         }, 1500);
     });
 
-    // 备用：如果 8 秒后还没有执行，强制检查一次
-    setTimeout(function() {
+    setTimeout(function () {
         if (!spiderExecuted) {
             console.warn("8 秒超时，强制检查...");
             if (detectCloudflare()) {
