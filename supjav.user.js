@@ -1,14 +1,10 @@
 // ==UserScript==
 // @name         Supjav
 // @namespace    gmspider
-// @version      2026.10.16.5
-// @description  Supjav GMSpider (CF原逻辑 + 按名点击 + ST/VOE data-link跳转)
+// @version      2026.10.16.6
+// @description  Supjav GMSpider (稳妥版: 保CF + 只强化EVS/VAS站内点击，去掉外链跳转)
 // @author       Luomo (refactored by Minis, fixed by Kimi)
 // @match        https://supjav.com/*
-// @match        https://*.supremejav.com/*
-// @match        https://streamtape.com/*
-// @match        https://*.voe.sx/*
-// @match        https://*.voe-network.net/*
 // @require      https://cdn.jsdelivr.net/npm/jquery@3.7.1/dist/jquery.slim.min.js
 // @grant        GM_cookie
 // @grant        unsafeWindow
@@ -73,6 +69,21 @@ console.log(JSON.stringify(GM_info));
         return (hasCF || isCFTitle || (isEmptyBody && !hasContent)) && !hasContent;
     }
 
+    function clearAds() {
+        try {
+            $(".movv-ad, .play-ad, #lcb, .adsbox, .ad-overlay, .live-box, [id*='live'], [class*='lovenube']").remove();
+            // 移除明显广告 iframe（保留播放器相关）
+            $("iframe").each(function () {
+                const src = (this.src || "").toLowerCase();
+                if (!src) return;
+                if (src.indexOf("ad") !== -1 || src.indexOf("popup") !== -1 ||
+                    src.indexOf("prebid") !== -1 || src.indexOf("doubleclick") !== -1) {
+                    $(this).remove();
+                }
+            });
+        } catch (e) {}
+    }
+
     function getServerButtons() {
         let $btns = $(".video-wrap .cd-server:first a.btn-server, .video-wrap .cd-server:first .btn-server");
         if ($btns.length === 0) $btns = $(".video-wrap a.btn-server, .video-wrap .btn-server");
@@ -83,7 +94,7 @@ console.log(JSON.stringify(GM_info));
     function clickServerButton(btn) {
         if (!btn) return false;
         try {
-            $(".movv-ad, .play-ad, #lcb, .adsbox, .ad-overlay").remove();
+            clearAds();
             if (typeof btn.scrollIntoView === "function") {
                 try { btn.scrollIntoView({block: "center", inline: "nearest"}); } catch (e) {}
             }
@@ -106,43 +117,14 @@ console.log(JSON.stringify(GM_info));
         if (name) {
             for (let i = 0; i < list.length; i++) {
                 const t = (list[i].textContent || list[i].innerText || "").trim().toUpperCase();
-                if (t === name || t.indexOf(name) !== -1 || name.indexOf(t) !== -1) {
-                    console.log("matched by name", name, "->", t);
+                if (t === name || t.indexOf(name) !== -1) {
+                    console.log("matched", name, "->", t, i);
                     return list[i];
                 }
             }
         }
         const idx = Math.min(Math.max(0, serverIdx | 0), list.length - 1);
         return list[idx];
-    }
-
-    // ST / VOE：data-link 反转后走 supremejav 跳转（与 CloudStream 同逻辑）
-    function tryDataLinkJump(btn, flag) {
-        if (!btn) return false;
-        const name = (flag || (btn.textContent || "")).toString().trim().toUpperCase();
-        // EVS/VAS/LUC 站内嗅探更稳，不强制跳转
-        if (name.indexOf("EVS") !== -1 || name.indexOf("VAS") !== -1 || name.indexOf("LUC") !== -1) {
-            return false;
-        }
-        let dataLink = btn.getAttribute("data-link") || btn.dataset?.link || "";
-        if (!dataLink) {
-            const $a = $(btn).closest("a");
-            if ($a.length) dataLink = $a.attr("data-link") || "";
-        }
-        if (!dataLink) {
-            console.log("no data-link on button", name);
-            return false;
-        }
-        const reversed = dataLink.split("").reverse().join("");
-        const jumpUrl = "https://lk1.supremejav.com/supjav.php?c=" + encodeURIComponent(reversed);
-        console.log("ST/VOE data-link jump:", jumpUrl);
-        try {
-            window.location.href = jumpUrl;
-            return true;
-        } catch (e) {
-            console.warn("jump failed", e);
-            return false;
-        }
     }
 
     function parseItems($boxes) {
@@ -173,7 +155,7 @@ console.log(JSON.stringify(GM_info));
     }
 
     const GmSpider = {
-        homeContent: function (filter) {
+        homeContent: function () {
             const defaultFilter = [{
                 key: "sort", name: "排序", value: [
                     {n: "观看数", v: "views"},
@@ -209,7 +191,7 @@ console.log(JSON.stringify(GM_info));
             return result;
         },
 
-        categoryContent: function (tid, pg, filter, extend) {
+        categoryContent: function (tid) {
             const result = {list: [], pagecount: 1};
             if (tid === "tag") {
                 $(".categorys .child, .tag-item, .category-item").each(function () {
@@ -291,42 +273,35 @@ console.log(JSON.stringify(GM_info));
             };
         },
 
+        // 稳妥：只站内点击，不跳外链；连点减少预览
         playerContent: function (flag, id, vipFlags) {
             const hashRaw = (window.location.hash || "").replace(/^#/, "");
             const idx = parseInt(hashRaw, 10);
             const serverIdx = isNaN(idx) ? 0 : idx;
-            console.log("playerContent: flag=", flag, "index=", serverIdx, "host=", location.hostname);
-
-            // 已跳到外链页（streamtape / voe / supremejav）时直接嗅探
-            const host = (location.hostname || "").toLowerCase();
-            if (host.indexOf("streamtape") !== -1 || host.indexOf("voe") !== -1 ||
-                host.indexOf("supremejav") !== -1 || host.indexOf("turboviplay") !== -1) {
-                console.log("on embed host, match only");
-                return {type: "match"};
-            }
+            console.log("playerContent flag=", flag, "idx=", serverIdx);
 
             function doPlay(left) {
+                clearAds();
                 const target = findTargetButton(flag, serverIdx);
                 if (!target) {
                     if (left > 0) setTimeout(function () { doPlay(left - 1); }, 400);
                     return;
                 }
-                const name = (flag || (target.textContent || "")).toString().trim().toUpperCase();
-                // ST / VOE：优先 data-link 跳转
-                if (name.indexOf("ST") !== -1 || name.indexOf("VOE") !== -1 ||
-                    name.indexOf("STREAM") !== -1 || name.indexOf("TAPE") !== -1) {
-                    if (tryDataLinkJump(target, flag)) return;
-                }
-                // 其它线路：站内点击（连点避开预览）
                 clickServerButton(target);
-                setTimeout(function () { clickServerButton(target); }, 600);
-                setTimeout(function () { clickServerButton(target); }, 1500);
+                setTimeout(function () {
+                    clearAds();
+                    clickServerButton(target);
+                }, 800);
+                setTimeout(function () {
+                    clearAds();
+                    clickServerButton(target);
+                }, 1800);
             }
             doPlay(20);
             return {type: "match"};
         },
 
-        searchContent: function (key, quick, pg) {
+        searchContent: function () {
             const result = {list: [], pagecount: 1};
             result.list = parseItems($(".post, .video-item, .card-video, .thumbnail"));
             result.pagecount = getPageCount();
@@ -348,10 +323,6 @@ console.log(JSON.stringify(GM_info));
         const result = GmSpider[GMSpiderArgs.fName](...GMSpiderArgs.fArgs);
         console.log("Spider 结果:", result);
 
-        if ((!result.list || result.list.length === 0) && GMSpiderArgs.fName !== "playerContent") {
-            console.warn("解析结果为空", document.title, location.href);
-        }
-
         if (typeof GmSpiderInject !== 'undefined') {
             if (GMSpiderArgs.fName !== "playerContent" && typeof GmSpiderInject.HideWebview === 'function') {
                 GmSpiderInject.HideWebview();
@@ -361,20 +332,15 @@ console.log(JSON.stringify(GM_info));
     }
 
     function startCloudflareWatch() {
-        console.log("检测到 Cloudflare，监控中...");
         if (typeof GmSpiderInject !== 'undefined') GmSpiderInject.ShowWebview();
         checkInterval = setInterval(function () {
             const hasContent = $(".post, .video-item, .card-video, .thumbnail").length > 0;
-            if (hasContent && !detectCloudflare()) {
-                console.log("CF 完成");
-                executeSpider();
-            }
+            if (hasContent && !detectCloudflare()) executeSpider();
         }, 1000);
         setTimeout(function () {
             if (checkInterval) {
                 clearInterval(checkInterval);
                 checkInterval = null;
-                console.warn("CF 超时");
                 executeSpider();
             }
         }, 45000);
