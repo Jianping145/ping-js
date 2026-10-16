@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Supjav
 // @namespace    gmspider
-// @version      2026.10.16.3
-// @description  Supjav GMSpider (保留原CF流程 + 仅修复播放点击/嗅探)
+// @version      2026.10.16.4
+// @description  Supjav GMSpider (保留原CF + 按线路名点击 + 避开预览流)
 // @author       Luomo (refactored by Minis, fixed by Kimi)
 // @match        https://supjav.com/*
 // @require      https://cdn.jsdelivr.net/npm/jquery@3.7.1/dist/jquery.slim.min.js
@@ -53,7 +53,7 @@ console.log(JSON.stringify(GM_info));
         return url;
     }
 
-    // ---------------- Cloudflare 检测（与能过验证的旧版完全一致） ----------------
+    // ---------------- Cloudflare 检测（与能过验证的旧版一致） ----------------
     function detectCloudflare() {
         const cfSelectors = [
             ".loading-verifying",
@@ -85,7 +85,7 @@ console.log(JSON.stringify(GM_info));
         return (hasCF || isCFTitle || (isEmptyBody && !hasContent)) && !hasContent;
     }
 
-    // ---------------- 播放辅助（新增，不影响 CF） ----------------
+    // ---------------- 播放辅助 ----------------
     function getServerButtons() {
         let $btns = $(".video-wrap .cd-server:first a.btn-server, .video-wrap .cd-server:first .btn-server");
         if ($btns.length === 0) {
@@ -100,7 +100,11 @@ console.log(JSON.stringify(GM_info));
     function clickServerButton(btn) {
         if (!btn) return false;
         try {
-            $(".movv-ad, .play-ad, #lcb").remove();
+            // 清广告/遮罩，减少干扰
+            $(".movv-ad, .play-ad, #lcb, .adsbox, .ad-overlay").remove();
+            if (typeof btn.scrollIntoView === "function") {
+                try { btn.scrollIntoView({block: "center", inline: "nearest"}); } catch (e) {}
+            }
             if (typeof btn.click === "function") btn.click();
             const opts = {bubbles: true, cancelable: true, view: window};
             btn.dispatchEvent(new MouseEvent("mousedown", opts));
@@ -111,6 +115,29 @@ console.log(JSON.stringify(GM_info));
             console.warn("clickServerButton:", e);
             return false;
         }
+    }
+
+    // 按线路名（flag）优先匹配按钮，避免点到预览/错线
+    function findTargetButton(flag, serverIdx) {
+        const $btns = getServerButtons();
+        const list = $btns.toArray();
+        if (list.length === 0) return null;
+
+        const name = (flag || "").toString().trim().toUpperCase();
+        if (name) {
+            // 精确或包含匹配：EVS / VAS / ST / VOE / LUC 等
+            for (let i = 0; i < list.length; i++) {
+                const t = (list[i].textContent || list[i].innerText || "").trim().toUpperCase();
+                if (t === name || t.indexOf(name) !== -1 || name.indexOf(t) !== -1) {
+                    console.log("playerContent: matched by name", name, "->", t, "index", i);
+                    return list[i];
+                }
+            }
+        }
+
+        const idx = Math.min(Math.max(0, serverIdx | 0), list.length - 1);
+        console.log("playerContent: fallback index", idx, "of", list.length);
+        return list[idx];
     }
 
     // ---------------- 通用列表解析 ----------------
@@ -161,11 +188,15 @@ console.log(JSON.stringify(GM_info));
                     {type_id: "category/english-subtitles", type_name: "英文字幕"},
                     {type_id: "tag", type_name: "类别"},
                 ],
-                filters: {popular: [{key: "sort", name: "时间", value: [
-                    {n: "本月热门", v: "month"},
-                    {n: "本周热门", v: "week"},
-                    {n: "今日热门", v: ""}
-                ]}]},
+                filters: {
+                    popular: [{
+                        key: "sort", name: "时间", value: [
+                            {n: "本月热门", v: "month"},
+                            {n: "本周热门", v: "week"},
+                            {n: "今日热门", v: ""}
+                        ]
+                    }]
+                },
                 list: []
             };
             result.class.forEach(item => {
@@ -262,29 +293,31 @@ console.log(JSON.stringify(GM_info));
             };
         },
 
-        // ★ 仅改播放：可靠点击 + 重试；CF/列表逻辑不动
+        // ★ 按线路名点击 + 多次点击，避开第一次预览流
         playerContent: function (flag, id, vipFlags) {
             const hashRaw = (window.location.hash || "").replace(/^#/, "");
             const idx = parseInt(hashRaw, 10);
             const serverIdx = isNaN(idx) ? 0 : idx;
-            console.log("playerContent: index =", serverIdx);
+            console.log("playerContent: flag =", flag, "index =", serverIdx);
 
-            function tryClick(left) {
-                const btns = getServerButtons().toArray();
-                console.log("playerContent: buttons =", btns.length, "left =", left);
-                if (btns.length > 0) {
-                    const target = btns[Math.min(serverIdx, btns.length - 1)];
+            function doClicks(left) {
+                const target = findTargetButton(flag, serverIdx);
+                if (target) {
                     clickServerButton(target);
+                    // 再点一次，把预览换成正片（你遇到的「第二次才对」）
                     setTimeout(function () {
-                        if (!document.querySelector("iframe#video, iframe[allowfullscreen], .video-wrap iframe, #player iframe")) {
-                            clickServerButton(target);
-                        }
-                    }, 800);
+                        clickServerButton(target);
+                    }, 600);
+                    setTimeout(function () {
+                        clickServerButton(target);
+                    }, 1500);
                     return;
                 }
-                if (left > 0) setTimeout(function () { tryClick(left - 1); }, 400);
+                if (left > 0) {
+                    setTimeout(function () { doClicks(left - 1); }, 400);
+                }
             }
-            tryClick(15);
+            doClicks(20);
             return {type: "match"};
         },
 
@@ -296,7 +329,7 @@ console.log(JSON.stringify(GM_info));
         }
     };
 
-    // ---------------- 启动逻辑（CF 与旧版一致；仅 player 不 HideWebview） ----------------
+    // ---------------- 启动逻辑（CF 与旧版一致；player 不 HideWebview） ----------------
     let spiderExecuted = false;
     let checkInterval = null;
 
@@ -324,7 +357,7 @@ console.log(JSON.stringify(GM_info));
         }
 
         if (typeof GmSpiderInject !== 'undefined') {
-            // 播放时不要立刻隐藏 WebView，否则嗅探不到 m3u8
+            // 播放时不要立刻隐藏，否则容易只嗅到预览
             if (GMSpiderArgs.fName !== "playerContent" && typeof GmSpiderInject.HideWebview === 'function') {
                 GmSpiderInject.HideWebview();
             }
