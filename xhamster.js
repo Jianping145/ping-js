@@ -87,10 +87,18 @@ async function category(tid, pg, filter, extend) {
 
         console.log('[XH] list=' + list.length)
 
+        // 频道/明星等列表较多，有数据就允许继续翻页；视频列表按数量判断
+        var hasMore = false
+        if (id === '/channels' || id === '/pornstars') {
+            hasMore = list.length > 0
+        } else {
+            hasMore = list.length >= 20
+        }
+
         return JSON.stringify({
             list: list,
             page: page,
-            pagecount: list.length >= 20 ? page + 1 : page,
+            pagecount: hasMore ? page + 1 : page,
             limit: 30,
             total: list.length > 0 ? page * 30 + 1 : 0,
         })
@@ -228,12 +236,24 @@ async function detail(ids) {
 
         var playUrls = []
         if (playUrl) {
-            // 提供多个分辨率
+            // 检测可用分辨率
             var qualities = ['2160p', '1080p', '720p', '480p', '360p', '240p']
+            var availableQualities = []
             for (var i = 0; i < qualities.length; i++) {
                 var q = qualities[i]
                 var qUrl = playUrl.replace('_TPL_', q)
-                playUrls.push(q + '$666_' + qUrl)
+                if (await testUrl(qUrl)) {
+                    playUrls.push(q + '$666_' + qUrl)
+                    availableQualities.push(q)
+                }
+            }
+            // 如果没有4K，添加提示
+            if (availableQualities.indexOf('2160p') < 0) {
+                title = title + ' [无4K]'
+            }
+            // 如果都没有，使用默认480p
+            if (playUrls.length === 0) {
+                playUrls.push('480p$666_' + playUrl.replace('_TPL_', '480p'))
             }
         } else {
             playUrls.push('嗅探$' + url)
@@ -270,10 +290,6 @@ async function play(flag, id, vipFlags) {
         if (id.indexOf('666_') === 0) {
             parse = 0
             url = id.substring(4)
-            // 替换 _TPL_ 为 480p
-            if (url.indexOf('_TPL_') >= 0) {
-                url = url.replace('_TPL_', '480p')
-            }
         }
 
         return JSON.stringify({
@@ -351,17 +367,27 @@ function parseVideosFrom(data, path) {
     return list
 }
 
-// 解析频道列表
+// 解析频道列表（channels 在 layoutPage 下）
 function parseChannels(data) {
     var list = []
-    if (!data || !data.channels) return list
+    if (!data) return list
 
-    for (var i = 0; i < data.channels.length; i++) {
-        var ch = data.channels[i]
+    // 优先 layoutPage.channels，再兼容根节点
+    var channels = null
+    if (data.layoutPage && data.layoutPage.channels) {
+        channels = data.layoutPage.channels
+    } else if (data.channels) {
+        channels = data.channels
+    }
+    if (!channels || !Array.isArray(channels)) return list
+
+    for (var i = 0; i < channels.length; i++) {
+        var ch = channels[i]
+        if (!ch) continue
         list.push({
-            vod_id: 'two_click_' + (ch.channelURL || ''),
-            vod_name: ch.channelName || '',
-            vod_pic: ch.siteLogoURL || ch.thumbURL || '',
+            vod_id: 'two_click_' + (ch.channelURL || ch.pageURL || ch.url || ''),
+            vod_name: ch.channelName || ch.name || '',
+            vod_pic: ch.siteLogoURL || ch.thumbURL || ch.imageURL || '',
             vod_remarks: 'videos:' + (ch.videoCount || 0),
             vod_tag: 'folder',
         })
@@ -413,12 +439,50 @@ function parsePornstars(data) {
     return list
 }
 
-// 获取页面初始化数据
+// 获取页面初始化数据（括号平衡，防止大JSON被截断）
 function getInitialData(html) {
     try {
-        var m = html.match(/initials=({[\s\S]*?});<\/script>/)
-        if (!m) m = html.match(/initials=({[\s\S]*?});/)
-        if (m) return JSON.parse(m[1])
+        if (!html) return null
+        var start = -1
+        var markers = ['window.initials=', 'initials=']
+        for (var mi = 0; mi < markers.length; mi++) {
+            var pos = html.indexOf(markers[mi])
+            if (pos !== -1) {
+                start = pos + markers[mi].length
+                break
+            }
+        }
+        if (start === -1) return null
+
+        while (start < html.length && ' \t\n\r'.indexOf(html.charAt(start)) >= 0) start++
+        if (start >= html.length || html.charAt(start) !== '{') return null
+
+        var depth = 0
+        var inStr = false
+        var escape = false
+        for (var i = start; i < html.length; i++) {
+            var c = html.charAt(i)
+            if (inStr) {
+                if (escape) {
+                    escape = false
+                } else if (c === '\\') {
+                    escape = true
+                } else if (c === '"') {
+                    inStr = false
+                }
+            } else {
+                if (c === '"') {
+                    inStr = true
+                } else if (c === '{') {
+                    depth++
+                } else if (c === '}') {
+                    depth--
+                    if (depth === 0) {
+                        return JSON.parse(html.substring(start, i + 1))
+                    }
+                }
+            }
+        }
     } catch (e) {
         console.log('[XH] getInitialData error: ' + e)
     }
@@ -448,6 +512,19 @@ function decodeHtml(s) {
         .replace(/&quot;/g, '"')
         .replace(/&#39;/g, "'")
         .replace(/&nbsp;/g, ' ')
+}
+
+// 测试URL是否可访问
+async function testUrl(url) {
+    try {
+        var res = await req(url, { 
+            headers: HEADERS,
+            method: 'HEAD'
+        })
+        return true
+    } catch (e) {
+        return false
+    }
 }
 
 export function __jsEvalReturn() {
