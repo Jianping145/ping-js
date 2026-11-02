@@ -406,7 +406,7 @@ async function detail(ids) {
       return JSON.stringify({ list: [vod] })
     }
 
-    var data = await apiRequest('/api/v4/movies/ + encodeURIComponent(id), {})
+    var data = await apiRequest('/api/v4/movies/' + encodeURIComponent(id), {})
     var x = (data && data.movie) || data || {}
     var number = String(x.number || '').trim()
     var title = String(x.title || x.origin_title || number || id).trim()
