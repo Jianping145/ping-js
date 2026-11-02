@@ -143,16 +143,79 @@ function normalizeCover(url, id) {
   if (url) {
     if (url.indexOf('//') === 0) url = 'https:' + url
     url = url.replace(/^https?:\/\/[^/]+\/rhe951l4q/i, 'https://c0.jdbstatic.com')
+    url = url.replace('/small_covers/', '/covers/')
     url = url.replace(/@Referer=.*$/, '')
     return url
   }
-  // 无封面时用 ID 反推
   if (id && String(id).length >= 2) {
     var sid = String(id)
     var prefix = sid.substring(0, 2).toLowerCase()
     return CDN_BASE + '/' + prefix + '/' + sid + '.jpg'
   }
   return ''
+}
+
+// 公共 tracker，加快磁力找源
+var TRACKERS = [
+  'udp://tracker.opentrackr.org:1337/announce',
+  'udp://open.tracker.cl:1337/announce',
+  'udp://tracker.openbittorrent.com:6969/announce',
+  'udp://open.stealth.si:80/announce',
+  'udp://tracker.torrent.eu.org:451/announce',
+  'udp://exodus.desync.com:6969/announce',
+  'udp://tracker.moeking.me:6969/announce',
+  'udp://explodie.org:6969/announce',
+  'udp://tracker1.bt.moack.co.kr:80/announce',
+  'udp://tracker.tiny-vps.com:6969/announce',
+  'http://tracker.openbittorrent.com:80/announce',
+  'http://tracker.opentrackr.org:1337/announce'
+]
+
+function magnetUrl(hash, name) {
+  hash = String(hash || '').trim().replace(/^magnet:\?xt=urn:btih:/i, '')
+  if (!hash) return ''
+  var url = 'magnet:?xt=urn:btih:' + hash
+  if (name) url += '&dn=' + encodeURIComponent(String(name))
+  for (var i = 0; i < TRACKERS.length; i++) {
+    url += '&tr=' + encodeURIComponent(TRACKERS[i])
+  }
+  return url
+}
+
+function sortMagnets(list) {
+  return (list || []).slice().sort(function (a, b) {
+    a = a || {}; b = b || {}
+    function score(m) {
+      var s = 0
+      var fc = Number(m.files_count || 0)
+      var name = String(m.name || '').toLowerCase()
+      if (fc === 1) s += 100
+      else if (fc > 0 && fc <= 3) s += 40
+      if (/\.mp4|\.mkv|\.avi/.test(name)) s += 30
+      if (m.cnsub || m.has_cnsub || m.is_subtitle) s += 20
+      if (m.hd) s += 10
+      var sz = Number(m.size || 0)
+      if (sz > 0 && sz < 2048) s += 5
+      return s
+    }
+    return score(b) - score(a)
+  })
+}
+
+function magnetLabel(m, i) {
+  m = m || {}
+  var label = String(m.name || m.title || ('#' + (i + 1))).trim()
+  var tags = []
+  var fc = Number(m.files_count || 0)
+  if (fc === 1) tags.push('单文件')
+  else if (fc > 1) tags.push(fc + '文件')
+  if (m.cnsub || m.has_cnsub || m.is_subtitle) tags.push('中字')
+  if (m.hd) tags.push('HD')
+  var size = formatSize(m.size)
+  if (size) tags.push(size)
+  if (tags.length) label = label + ' [' + tags.join('/') + ']'
+  var prefix = (fc === 1 || /\.mp4|\.mkv/i.test(label)) ? '★ ' : ''
+  return prefix + label
 }
 
 function mapMovie(x) {
@@ -442,24 +505,17 @@ async function detail(ids) {
       actors = x.actors.map(function (a) { return a.name_zht || a.name || '' }).filter(Boolean)
     }
 
-    // 磁链
+    // 磁链（带 tracker + 单文件优先）
     var magnets = []
     try {
       var magData = await apiRequest('/api/v1/movies/' + encodeURIComponent(id) + '/magnets', {})
-      var mlist = (magData && magData.magnets) || []
+      var mlist = sortMagnets((magData && magData.magnets) || [])
       for (var i = 0; i < mlist.length; i++) {
         var m = mlist[i] || {}
         var hash = String(m.hash || '').trim().replace(/^magnet:\?xt=urn:btih:/i, '')
         if (!hash && !m.magnet_url && !m.url) continue
-        var url = hash ? ('magnet:?xt=urn:btih:' + hash) : (m.magnet_url || m.url)
-        var label = String(m.name || m.title || hash || ('磁力' + (i + 1))).trim()
-        var tags = []
-        if (m.cnsub || m.has_cnsub || m.is_subtitle) tags.push('中字')
-        if (m.hd) tags.push('HD')
-        var size = formatSize(m.size)
-        if (size) tags.push(size)
-        if (tags.length) label = label + ' [' + tags.join('/') + ']'
-        magnets.push(label + '$' + url)
+        var url = hash ? magnetUrl(hash, m.name || m.title || '') : (m.magnet_url || m.url)
+        magnets.push(magnetLabel(m, i) + '$' + url)
       }
     } catch (me) {
       console.log('magnets error: ' + me)
@@ -505,19 +561,13 @@ async function play(flag, id, vipFlags) {
       var mid = playId.replace(/^movie:/, '')
       try {
         var magData = await apiRequest('/api/v1/movies/' + encodeURIComponent(mid) + '/magnets', {})
-        var mlist = (magData && magData.magnets) || []
-        // 优先中字 / HD
-        mlist.sort(function (a, b) {
-          var sa = (a.cnsub || a.has_cnsub ? 2 : 0) + (a.hd ? 1 : 0)
-          var sb = (b.cnsub || b.has_cnsub ? 2 : 0) + (b.hd ? 1 : 0)
-          return sb - sa
-        })
+        var mlist = sortMagnets((magData && magData.magnets) || [])
         for (var i = 0; i < mlist.length; i++) {
           var m = mlist[i] || {}
           var hash = String(m.hash || '').trim().replace(/^magnet:\?xt=urn:btih:/i, '')
           if (hash) {
             return JSON.stringify({
-              url: 'magnet:?xt=urn:btih:' + hash,
+              url: magnetUrl(hash, m.name || m.title || ''),
               header: JSON.stringify({ 'User-Agent': 'Mozilla/5.0' })
             })
           }
@@ -535,8 +585,14 @@ async function play(flag, id, vipFlags) {
     }
 
     if (playId.indexOf('magnet:') === 0) {
+      // 已是完整磁链则直接播；若是裸 hash 形式再补 tracker
+      var raw = playId
+      var hm = raw.match(/btih:([a-fA-F0-9]{40})/)
+      if (hm && raw.indexOf('&tr=') < 0) {
+        raw = magnetUrl(hm[1], '')
+      }
       return JSON.stringify({
-        url: playId,
+        url: raw,
         header: JSON.stringify({ 'User-Agent': 'Mozilla/5.0' })
       })
     }
