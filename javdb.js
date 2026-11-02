@@ -179,14 +179,18 @@ function mapActor(x) {
   x = x || {}
   var id = String(x.id || '')
   var name = String(x.name_zht || x.name || id).trim()
-  var cover = normalizeCover(x.avatar_url || x.cover_url || '', id)
-  // 头像 CDN 路径是 avatars 不是 covers
-  if (cover && cover.indexOf('/covers/') >= 0 && (x.avatar_url || '').indexOf('avatar') >= 0) {
+  var raw = String(x.avatar_url || x.cover_url || '').trim()
+  var cover = ''
+  if (raw) {
+    cover = raw.replace(/&amp;/g, '&')
+    if (cover.indexOf('//') === 0) cover = 'https:' + cover
+    // 加密 CDN → 静态图床，头像目录是 avatars
+    cover = cover.replace(/^https?:\/\/[^/]+\/rhe951l4q/i, 'https://c0.jdbstatic.com')
     cover = cover.replace('/covers/', '/avatars/')
+    cover = cover.replace(/@Referer=.*$/, '')
   }
   if (!cover && id.length >= 2) {
-    var prefix = id.substring(0, 2).toLowerCase()
-    cover = 'https://c0.jdbstatic.com/avatars/' + prefix + '/' + id + '.jpg'
+    cover = 'https://c0.jdbstatic.com/avatars/' + id.substring(0, 2).toLowerCase() + '/' + id + '.jpg'
   }
   var remarks = []
   if (x.videos_count) remarks.push('作品 ' + x.videos_count)
@@ -195,8 +199,7 @@ function mapActor(x) {
     vod_id: 'actor_' + id,
     vod_name: name,
     vod_pic: cover,
-    vod_remarks: remarks.join(' · '),
-    vod_tag: 'actor'
+    vod_remarks: remarks.join(' · ')
   }
 }
 
@@ -326,7 +329,7 @@ async function detail(ids) {
     var id = Array.isArray(ids) ? ids[0] : ids
     console.log('detail: ' + id)
 
-    // 演员详情：列出其作品作为播放源列表入口（每部作品一条，点进去看磁链需再进影片）
+    // 演员 → 作品列表（以选集形式展示，每一集是一部作品）
     if (String(id).indexOf('actor_') === 0) {
       var actorId = String(id).replace(/^actor_/, '')
       var actorInfo = {}
@@ -335,15 +338,20 @@ async function detail(ids) {
         actorInfo = (ad && ad.actor) || ad || {}
       } catch (_e) {}
       var actorName = String(actorInfo.name_zht || actorInfo.name || actorId).trim()
-      var actorCover = normalizeCover(actorInfo.avatar_url || '', actorId)
-      if (actorCover.indexOf('/covers/') >= 0) actorCover = actorCover.replace('/covers/', '/avatars/')
+      var actorCover = ''
+      var rawAvatar = String(actorInfo.avatar_url || '').trim()
+      if (rawAvatar) {
+        actorCover = rawAvatar.replace(/^https?:\/\/[^/]+\/rhe951l4q/i, 'https://c0.jdbstatic.com')
+        actorCover = actorCover.replace('/covers/', '/avatars/')
+      }
       if (!actorCover && actorId.length >= 2) {
         actorCover = 'https://c0.jdbstatic.com/avatars/' + actorId.substring(0, 2).toLowerCase() + '/' + actorId + '.jpg'
       }
 
-      // 拉取演员作品（多页合并前几页，方便一次看到更多）
+      // 分页拉取作品列表
       var movies = []
-      for (var p = 1; p <= 3; p++) {
+      var maxPage = 5
+      for (var p = 1; p <= maxPage; p++) {
         try {
           var md = await apiRequest('/api/v1/movies/tags', {
             filter_by: '0:a:' + actorId + ':',
@@ -356,36 +364,49 @@ async function detail(ids) {
           if (!arr.length) break
           movies = movies.concat(arr)
           if (arr.length < PAGE_SIZE) break
-        } catch (_me) { break }
+        } catch (_me) {
+          console.log('actor works page ' + p + ' error: ' + _me)
+          break
+        }
       }
 
+      // 每一部作品作为一集：名称$movie:id
+      // 用户在选集列表里看到作品名，点选后 play() 自动取磁链
       var playUrls = []
       for (var i = 0; i < movies.length; i++) {
-        var m = mapMovie(movies[i])
-        // 用影片 id 作为 play url，play() 里再解析为磁链列表不合适；
-        // T3 详情里把每部作品做成「线路」，点开后由 detail 再进影片更合理。
-        // 这里直接拉每部作品的第一条磁链会太慢，改为：播放地址用 movie id，play 时再取磁链。
-        playUrls.push(m.vod_name + '$movie:' + m.vod_id)
+        var m = movies[i] || {}
+        var mid = String(m.id || '')
+        if (!mid) continue
+        var num = String(m.number || '').trim()
+        var title = String(m.title || m.origin_title || '').trim()
+        var label = num ? (num + ' ' + title) : (title || mid)
+        // 去掉会破坏 T3 分隔符的字符
+        label = label.replace(/\$/g, ' ').replace(/#/g, ' ').trim()
+        if (!label) label = mid
+        playUrls.push(label + '$movie:' + mid)
       }
-      if (playUrls.length === 0) playUrls.push('暂无作品$')
+      if (playUrls.length === 0) {
+        playUrls.push('暂无作品$')
+      }
 
       var vod = {
         vod_id: id,
-        vod_name: actorName,
+        vod_name: actorName + ' 的作品',
         vod_pic: actorCover,
-        vod_remarks: (actorInfo.videos_count ? ('作品 ' + actorInfo.videos_count) : (movies.length + ' 部')),
+        vod_remarks: '共 ' + playUrls.length + ' 部',
         vod_year: '',
         vod_area: '',
         vod_actor: actorName,
         vod_director: '',
-        vod_content: String(actorInfo.other_name || actorInfo.name || '').trim(),
-        vod_play_from: '演员作品',
+        vod_content: (actorInfo.other_name ? ('又名：' + actorInfo.other_name + '\\n') : '') + '共 ' + movies.length + ' 部作品，请在下方选集中选择',
+        vod_play_from: '作品列表',
         vod_play_url: playUrls.join('#')
       }
+      console.log('actor ' + actorId + ' works: ' + playUrls.length)
       return JSON.stringify({ list: [vod] })
     }
 
-    var data = await apiRequest('/api/v4/movies/' + encodeURIComponent(id), {})
+    var data = await apiRequest('/api/v4/movies/ + encodeURIComponent(id), {})
     var x = (data && data.movie) || data || {}
     var number = String(x.number || '').trim()
     var title = String(x.title || x.origin_title || number || id).trim()
