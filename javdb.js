@@ -184,7 +184,6 @@ function mapActor(x) {
   if (raw) {
     cover = raw.replace(/&amp;/g, '&')
     if (cover.indexOf('//') === 0) cover = 'https:' + cover
-    // 加密 CDN → 静态图床，头像目录是 avatars
     cover = cover.replace(/^https?:\/\/[^/]+\/rhe951l4q/i, 'https://c0.jdbstatic.com')
     cover = cover.replace('/covers/', '/avatars/')
     cover = cover.replace(/@Referer=.*$/, '')
@@ -195,11 +194,15 @@ function mapActor(x) {
   var remarks = []
   if (x.videos_count) remarks.push('作品 ' + x.videos_count)
   if (x.other_name) remarks.push(String(x.other_name).split(',')[0])
+  // type:1 / folder 让支持二级的客户端把点击交给 category(tid)
   return {
     vod_id: 'actor_' + id,
     vod_name: name,
     vod_pic: cover,
-    vod_remarks: remarks.join(' · ')
+    vod_remarks: remarks.join(' · '),
+    type: 1,
+    folder: true,
+    vod_tag: 'folder'
   }
 }
 
@@ -261,11 +264,33 @@ async function category(tid, pg, filter, extend) {
       anime: '4'
     }
 
-    // 演员分类
+    // 点某个演员后：tid = actor_xxx → 返回该演员作品（卡片列表）
+    if (String(tid).indexOf('actor_') === 0) {
+      var actorId = String(tid).replace(/^actor_/, '')
+      console.log('category actor works: ' + actorId + ' page ' + page)
+      var md = await apiRequest('/api/v1/movies/tags', {
+        filter_by: '0:a:' + actorId + ':',
+        sort_by: 'release',
+        order_by: 'desc',
+        page: page,
+        limit: PAGE_SIZE
+      })
+      var works = (md && md.movies) || []
+      if (!Array.isArray(works)) works = []
+      var workList = works.map(mapMovie)
+      console.log('actor works count: ' + workList.length)
+      return JSON.stringify({
+        list: workList,
+        page: page,
+        pagecount: workList.length >= PAGE_SIZE ? page + 1 : page,
+        total: workList.length > 0 ? page * PAGE_SIZE + 1 : 0
+      })
+    }
+
+    // 演员分类：演员卡片列表
     if (tid === 'actors') {
       var actorList = []
       if (page === 1) {
-        // 首页用推荐演员（合并三组）
         var adata = await apiRequest('/api/v1/actors/recommend', { page: 1 })
         adata = adata || {}
         var seen = {}
@@ -280,7 +305,6 @@ async function category(tid, pg, filter, extend) {
           }
         }
       } else {
-        // 后续页用有码演员列表分页
         var adata2 = await apiRequest('/api/v1/actors', { page: page, limit: PAGE_SIZE, type: '0' })
         var arr2 = (adata2 && adata2.actors) || []
         actorList = arr2.map(mapActor)
