@@ -175,6 +175,31 @@ function mapMovie(x) {
   }
 }
 
+function mapActor(x) {
+  x = x || {}
+  var id = String(x.id || '')
+  var name = String(x.name_zht || x.name || id).trim()
+  var cover = normalizeCover(x.avatar_url || x.cover_url || '', id)
+  // 头像 CDN 路径是 avatars 不是 covers
+  if (cover && cover.indexOf('/covers/') >= 0 && (x.avatar_url || '').indexOf('avatar') >= 0) {
+    cover = cover.replace('/covers/', '/avatars/')
+  }
+  if (!cover && id.length >= 2) {
+    var prefix = id.substring(0, 2).toLowerCase()
+    cover = 'https://c0.jdbstatic.com/avatars/' + prefix + '/' + id + '.jpg'
+  }
+  var remarks = []
+  if (x.videos_count) remarks.push('作品 ' + x.videos_count)
+  if (x.other_name) remarks.push(String(x.other_name).split(',')[0])
+  return {
+    vod_id: 'actor_' + id,
+    vod_name: name,
+    vod_pic: cover,
+    vod_remarks: remarks.join(' · '),
+    vod_tag: 'actor'
+  }
+}
+
 function formatSize(v) {
   if (v === undefined || v === null || v === '') return ''
   if (typeof v === 'string' && /[KMGTkmgt]/.test(v)) return v
@@ -201,7 +226,8 @@ async function home(filter) {
     { type_id: 'uncensored', type_name: '无码' },
     { type_id: 'western', type_name: '欧美' },
     { type_id: 'fc2', type_name: 'FC2' },
-    { type_id: 'anime', type_name: '动漫' }
+    { type_id: 'anime', type_name: '动漫' },
+    { type_id: 'actors', type_name: '演员' }
   ]
   return JSON.stringify({ class: classes })
 }
@@ -231,6 +257,40 @@ async function category(tid, pg, filter, extend) {
       fc2: '3',
       anime: '4'
     }
+
+    // 演员分类
+    if (tid === 'actors') {
+      var actorList = []
+      if (page === 1) {
+        // 首页用推荐演员（合并三组）
+        var adata = await apiRequest('/api/v1/actors/recommend', { page: 1 })
+        adata = adata || {}
+        var seen = {}
+        var groups = ['recommend_actors', 'monthly_actors', 'new_actors']
+        for (var g = 0; g < groups.length; g++) {
+          var arr = adata[groups[g]] || []
+          for (var i = 0; i < arr.length; i++) {
+            var a = mapActor(arr[i])
+            if (!a.vod_id || seen[a.vod_id]) continue
+            seen[a.vod_id] = true
+            actorList.push(a)
+          }
+        }
+      } else {
+        // 后续页用有码演员列表分页
+        var adata2 = await apiRequest('/api/v1/actors', { page: page, limit: PAGE_SIZE, type: '0' })
+        var arr2 = (adata2 && adata2.actors) || []
+        actorList = arr2.map(mapActor)
+      }
+      console.log('category actors page ' + page + ': ' + actorList.length)
+      return JSON.stringify({
+        list: actorList,
+        page: page,
+        pagecount: actorList.length >= 10 ? page + 1 : page,
+        total: actorList.length > 0 ? page * PAGE_SIZE + 1 : 0
+      })
+    }
+
     var list = []
     if (!tid || tid === 'hot') {
       var data = await apiRequest('/api/v1/movies/recommend', { page: page, limit: PAGE_SIZE })
@@ -265,6 +325,66 @@ async function detail(ids) {
   try {
     var id = Array.isArray(ids) ? ids[0] : ids
     console.log('detail: ' + id)
+
+    // 演员详情：列出其作品作为播放源列表入口（每部作品一条，点进去看磁链需再进影片）
+    if (String(id).indexOf('actor_') === 0) {
+      var actorId = String(id).replace(/^actor_/, '')
+      var actorInfo = {}
+      try {
+        var ad = await apiRequest('/api/v1/actors/' + encodeURIComponent(actorId), {})
+        actorInfo = (ad && ad.actor) || ad || {}
+      } catch (_e) {}
+      var actorName = String(actorInfo.name_zht || actorInfo.name || actorId).trim()
+      var actorCover = normalizeCover(actorInfo.avatar_url || '', actorId)
+      if (actorCover.indexOf('/covers/') >= 0) actorCover = actorCover.replace('/covers/', '/avatars/')
+      if (!actorCover && actorId.length >= 2) {
+        actorCover = 'https://c0.jdbstatic.com/avatars/' + actorId.substring(0, 2).toLowerCase() + '/' + actorId + '.jpg'
+      }
+
+      // 拉取演员作品（多页合并前几页，方便一次看到更多）
+      var movies = []
+      for (var p = 1; p <= 3; p++) {
+        try {
+          var md = await apiRequest('/api/v1/movies/tags', {
+            filter_by: '0:a:' + actorId + ':',
+            sort_by: 'release',
+            order_by: 'desc',
+            page: p,
+            limit: PAGE_SIZE
+          })
+          var arr = (md && md.movies) || []
+          if (!arr.length) break
+          movies = movies.concat(arr)
+          if (arr.length < PAGE_SIZE) break
+        } catch (_me) { break }
+      }
+
+      var playUrls = []
+      for (var i = 0; i < movies.length; i++) {
+        var m = mapMovie(movies[i])
+        // 用影片 id 作为 play url，play() 里再解析为磁链列表不合适；
+        // T3 详情里把每部作品做成「线路」，点开后由 detail 再进影片更合理。
+        // 这里直接拉每部作品的第一条磁链会太慢，改为：播放地址用 movie id，play 时再取磁链。
+        playUrls.push(m.vod_name + '$movie:' + m.vod_id)
+      }
+      if (playUrls.length === 0) playUrls.push('暂无作品$')
+
+      var vod = {
+        vod_id: id,
+        vod_name: actorName,
+        vod_pic: actorCover,
+        vod_remarks: (actorInfo.videos_count ? ('作品 ' + actorInfo.videos_count) : (movies.length + ' 部')),
+        vod_year: '',
+        vod_area: '',
+        vod_actor: actorName,
+        vod_director: '',
+        vod_content: String(actorInfo.other_name || actorInfo.name || '').trim(),
+        vod_play_from: '演员作品',
+        vod_play_url: playUrls.join('#')
+      }
+      return JSON.stringify({ list: [vod] })
+    }
+
     var data = await apiRequest('/api/v4/movies/' + encodeURIComponent(id), {})
     var x = (data && data.movie) || data || {}
     var number = String(x.number || '').trim()
@@ -333,14 +453,50 @@ async function detail(ids) {
 async function play(flag, id, vipFlags) {
   try {
     console.log('play: ' + id)
-    if (String(id).indexOf('magnet:') === 0) {
+    var playId = String(id || '')
+
+    // 演员作品入口：movie:影片ID → 取第一条磁链播放
+    if (playId.indexOf('movie:') === 0) {
+      var mid = playId.replace(/^movie:/, '')
+      try {
+        var magData = await apiRequest('/api/v1/movies/' + encodeURIComponent(mid) + '/magnets', {})
+        var mlist = (magData && magData.magnets) || []
+        // 优先中字 / HD
+        mlist.sort(function (a, b) {
+          var sa = (a.cnsub || a.has_cnsub ? 2 : 0) + (a.hd ? 1 : 0)
+          var sb = (b.cnsub || b.has_cnsub ? 2 : 0) + (b.hd ? 1 : 0)
+          return sb - sa
+        })
+        for (var i = 0; i < mlist.length; i++) {
+          var m = mlist[i] || {}
+          var hash = String(m.hash || '').trim().replace(/^magnet:\?xt=urn:btih:/i, '')
+          if (hash) {
+            return JSON.stringify({
+              url: 'magnet:?xt=urn:btih:' + hash,
+              header: JSON.stringify({ 'User-Agent': 'Mozilla/5.0' })
+            })
+          }
+          if (m.magnet_url || m.url) {
+            return JSON.stringify({
+              url: m.magnet_url || m.url,
+              header: JSON.stringify({ 'User-Agent': 'Mozilla/5.0' })
+            })
+          }
+        }
+      } catch (me) {
+        console.log('play movie magnets error: ' + me)
+      }
+      return JSON.stringify({ url: '', message: '该作品暂无磁链' })
+    }
+
+    if (playId.indexOf('magnet:') === 0) {
       return JSON.stringify({
-        url: id,
+        url: playId,
         header: JSON.stringify({ 'User-Agent': 'Mozilla/5.0' })
       })
     }
     return JSON.stringify({
-      url: id,
+      url: playId,
       header: JSON.stringify({ 'User-Agent': 'Mozilla/5.0' })
     })
   } catch (e) {
