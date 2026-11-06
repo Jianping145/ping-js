@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Supjav
 // @namespace    gmspider
-// @version      2026.10.16.6
-// @description  Supjav GMSpider (稳妥版: 保CF + 只强化EVS/VAS站内点击，去掉外链跳转)
-// @author       Luomo (refactored by Minis, fixed by Kimi)
+// @version      2026.11.06.1
+// @description  Supjav GMSpider (稳妥加强版: 保CF + 强化验证等待 + 只站内点击，去掉外链跳转)
+// @author       Luomo (refactored by Minis, fixed by Kimi, optimized 2026.11.06)
 // @match        https://supjav.com/*
 // @require      https://cdn.jsdelivr.net/npm/jquery@3.7.1/dist/jquery.slim.min.js
 // @grant        GM_cookie
@@ -23,6 +23,8 @@ console.log(JSON.stringify(GM_info));
     Object.freeze(GMSpiderArgs);
 
     let cf_clearance = null;
+    let spiderExecuted = false;
+    let checkInterval = null;
 
     function initCfClearance() {
         if (cf_clearance) return;
@@ -31,14 +33,21 @@ console.log(JSON.stringify(GM_info));
                 if (!error && cookies?.length > 0) {
                     cf_clearance = cookies[0].value;
                     localStorage.setItem("cf_clearance", cf_clearance);
+                    console.log("cf_clearance loaded from cookie");
                 } else {
                     const cached = localStorage.getItem("cf_clearance");
-                    if (cached) cf_clearance = cached;
+                    if (cached) {
+                        cf_clearance = cached;
+                        console.log("cf_clearance loaded from localStorage");
+                    }
                 }
             });
         } catch (e) {
             const cached = localStorage.getItem("cf_clearance");
-            if (cached) cf_clearance = cached;
+            if (cached) {
+                cf_clearance = cached;
+                console.log("cf_clearance loaded from localStorage (fallback)");
+            }
         }
     }
 
@@ -56,23 +65,27 @@ console.log(JSON.stringify(GM_info));
         const cfSelectors = [
             ".loading-verifying", "#challenge-form", ".cf-browser-verification",
             "#cf-please-wait", ".cf-challenge-running", "[data-translate='checking_browser']",
-            ".cf-wrapper", "#challenge-error-title", ".cf-challenge-body", "#cf-challenge-running"
+            ".cf-wrapper", "#challenge-error-title", ".cf-challenge-body", "#cf-challenge-running",
+            "#challenge-stage", ".cf-im-under-attack", "#cf-content", ".main-wrapper"
         ];
         const hasCF = cfSelectors.some(s => $(s).length > 0);
-        const title = document.title.toLowerCase();
+        const title = (document.title || "").toLowerCase();
         const isCFTitle = title.includes("cloudflare") || title.includes("checking") ||
             title.includes("verify") || title.includes("attention required") ||
-            title.includes("please wait") || title.includes("just a moment");
-        const bodyText = document.body?.innerText?.trim() || "";
-        const isEmptyBody = bodyText.length < 200;
-        const hasContent = $(".post, .video-item, .card-video, .thumbnail").length > 0;
-        return (hasCF || isCFTitle || (isEmptyBody && !hasContent)) && !hasContent;
+            title.includes("please wait") || title.includes("just a moment") ||
+            title.includes("security") || title.includes("验证");
+        const bodyText = (document.body?.innerText || "").trim();
+        const isEmptyBody = bodyText.length < 300;
+        const hasContent = $(".post, .video-item, .card-video, .thumbnail, .video-wrap, .cd-server").length > 0;
+        // 额外判断中文验证文案
+        const hasCNVerify = bodyText.includes("正在进行安全验证") || bodyText.includes("安全服务") ||
+            bodyText.includes("防护恶意自动程序") || bodyText.includes("验证您不是自动程序");
+        return (hasCF || isCFTitle || hasCNVerify || (isEmptyBody && !hasContent)) && !hasContent;
     }
 
     function clearAds() {
         try {
             $(".movv-ad, .play-ad, #lcb, .adsbox, .ad-overlay, .live-box, [id*='live'], [class*='lovenube']").remove();
-            // 移除明显广告 iframe（保留播放器相关）
             $("iframe").each(function () {
                 const src = (this.src || "").toLowerCase();
                 if (!src) return;
@@ -82,6 +95,44 @@ console.log(JSON.stringify(GM_info));
                 }
             });
         } catch (e) {}
+    }
+
+    function tryClickChallenge() {
+        try {
+            // 常见 Cloudflare 验证按钮 / 复选框
+            const selectors = [
+                "#challenge-stage button",
+                "#challenge-form button",
+                ".cf-button",
+                "input[type='button']",
+                "input[type='submit']",
+                ".btn",
+                "#challenge-stage input[type='checkbox']",
+                ".ctp-checkbox-label",
+                "label.cb-lb",
+                "#cf-please-wait",
+                ".main-content button"
+            ];
+            for (const sel of selectors) {
+                const el = document.querySelector(sel);
+                if (el && el.offsetParent !== null) {
+                    try {
+                        el.scrollIntoView({block: "center"});
+                        el.click();
+                        console.log("尝试点击验证元素:", sel);
+                    } catch (e) {}
+                }
+            }
+            // 模拟点击页面中心（部分挑战需要）
+            try {
+                const centerX = window.innerWidth / 2;
+                const centerY = window.innerHeight / 2;
+                const evtOpts = {bubbles: true, cancelable: true, view: window, clientX: centerX, clientY: centerY};
+                document.elementFromPoint(centerX, centerY)?.dispatchEvent(new MouseEvent("click", evtOpts));
+            } catch (e) {}
+        } catch (e) {
+            console.warn("tryClickChallenge error:", e);
+        }
     }
 
     function getServerButtons() {
@@ -309,9 +360,6 @@ console.log(JSON.stringify(GM_info));
         }
     };
 
-    let spiderExecuted = false;
-    let checkInterval = null;
-
     function executeSpider() {
         if (spiderExecuted) return;
         spiderExecuted = true;
@@ -332,37 +380,78 @@ console.log(JSON.stringify(GM_info));
     }
 
     function startCloudflareWatch() {
-        if (typeof GmSpiderInject !== 'undefined') GmSpiderInject.ShowWebview();
+        if (typeof GmSpiderInject !== 'undefined') {
+            try { GmSpiderInject.ShowWebview(); } catch (e) {}
+        }
+        console.log("开始 Cloudflare 等待监控...");
+
+        let tryCount = 0;
+        const maxTry = 90; // 最多等待 90 秒
+
+        // 立即尝试一次
+        tryClickChallenge();
+        initCfClearance();
+
         checkInterval = setInterval(function () {
-            const hasContent = $(".post, .video-item, .card-video, .thumbnail").length > 0;
-            if (hasContent && !detectCloudflare()) executeSpider();
-        }, 1000);
-        setTimeout(function () {
-            if (checkInterval) {
-                clearInterval(checkInterval);
-                checkInterval = null;
+            tryCount++;
+            clearAds();
+            tryClickChallenge();
+
+            const hasContent = $(".post, .video-item, .card-video, .thumbnail, .video-wrap, .cd-server").length > 0;
+            const stillCF = detectCloudflare();
+
+            // 重新尝试获取 cookie
+            if (tryCount % 5 === 0) {
+                initCfClearance();
+            }
+
+            if (hasContent && !stillCF) {
+                console.log("CF验证通过，内容已出现，开始执行Spider (第" + tryCount + "秒)");
+                // 再等一点点让页面稳定
+                setTimeout(function () {
+                    executeSpider();
+                }, 800);
+                return;
+            }
+
+            if (tryCount >= maxTry) {
+                console.log("CF等待超时(" + maxTry + "秒)，强制执行Spider");
+                if (checkInterval) {
+                    clearInterval(checkInterval);
+                    checkInterval = null;
+                }
                 executeSpider();
             }
-        }, 45000);
+        }, 1000);
     }
 
+    // 启动逻辑
     $(document).ready(function () {
         setTimeout(function () {
-            if (detectCloudflare()) startCloudflareWatch();
-        }, 500);
+            if (detectCloudflare()) {
+                startCloudflareWatch();
+            }
+        }, 600);
     });
 
     $(unsafeWindow).on("load", function () {
         setTimeout(function () {
-            if (detectCloudflare()) startCloudflareWatch();
-            else executeSpider();
-        }, 1500);
+            if (detectCloudflare()) {
+                startCloudflareWatch();
+            } else {
+                executeSpider();
+            }
+        }, 1800);
     });
 
+    // 最终兜底
     setTimeout(function () {
         if (!spiderExecuted) {
-            if (detectCloudflare()) startCloudflareWatch();
-            else executeSpider();
+            if (detectCloudflare()) {
+                startCloudflareWatch();
+            } else {
+                executeSpider();
+            }
         }
-    }, 8000);
+    }, 10000);
 })();
