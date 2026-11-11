@@ -493,12 +493,38 @@ async function detail(ids) {
       return JSON.stringify({ list: [vod] })
     }
 
-    var data = await apiRequest('/api/v4/movies/' + encodeURIComponent(id), {})
-    var x = (data && data.movie) || data || {}
+    // v4 详情现已要求登录；用搜索补全元数据 + 磁链接口（无需登录）
+    var x = {}
+    try {
+      // 尝试用 id 当关键词搜索，拿列表字段补标题/封面
+      var sd = await apiRequest('/api/v2/search', {
+        q: id,
+        page: 1,
+        type: 'movie',
+        movie_type: 'all',
+        movie_sort_by: 'relevance',
+        movie_filter_by: 'all'
+      })
+      var smovies = (sd && sd.movies) || []
+      for (var si = 0; si < smovies.length; si++) {
+        if (String(smovies[si].id || '') === String(id)) {
+          x = smovies[si]
+          break
+        }
+      }
+      if (!x.id && smovies.length) x = smovies[0]
+    } catch (se) {
+      console.log('detail search fallback error: ' + se)
+    }
+
     var number = String(x.number || '').trim()
     var title = String(x.title || x.origin_title || number || id).trim()
     var name = number ? (number + ' ' + title) : title
     var cover = normalizeCover(x.cover_url || x.thumb_url || '', id)
+    // 没有封面时用 ID 反推
+    if (!cover && String(id).length >= 2) {
+      cover = CDN_BASE + '/' + String(id).substring(0, 2).toLowerCase() + '/' + id + '.jpg'
+    }
 
     var actors = []
     if (Array.isArray(x.actors)) {
@@ -530,6 +556,7 @@ async function detail(ids) {
     if (x.release_date) remarks.push(String(x.release_date))
     if (x.duration) remarks.push(x.duration + ' 分钟')
     if (x.magnets_count) remarks.push('磁链 ' + x.magnets_count)
+    if (!remarks.length && magnets.length) remarks.push('磁链 ' + magnets.length)
 
     var vod = {
       vod_id: id,
@@ -540,7 +567,7 @@ async function detail(ids) {
       vod_area: '',
       vod_actor: actors.join(' / '),
       vod_director: (x.director && (x.director.name_zht || x.director.name)) || '',
-      vod_content: String(x.summary || x.title || '').trim(),
+      vod_content: String(x.summary || x.title || name || '').trim(),
       vod_play_from: 'JAVDB磁力',
       vod_play_url: magnets.join('#')
     }
